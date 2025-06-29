@@ -1,120 +1,378 @@
-from playwright.sync_api import sync_playwright, TimeoutError
-from playwright_stealth import stealth_sync
-import json
-from datetime import datetime
-
-def extract_product_data(page, url):
-    """단일 제품 페이지에서 데이터를 추출하는 함수"""
-    try:
-        # 페이지 로딩 전략 변경 및 명시적 대기 추가
-        page.goto(url, wait_until='load', timeout=60000)
-        page.wait_for_selector('[class*="ProductDetails__ProductTitle"]', timeout=30000)
-    except TimeoutError:
-        print(f"페이지 로드 시간 초과: {url}")
-        return None
-
-    # --- 데이터 추출 ---
-    
-    # 제품명
-    try:
-        product_name = page.locator('[class*="ProductDetails__ProductTitle"]').inner_text(timeout=3000)
-    except Exception as e:
-        product_name = f"제품명을 찾을 수 없습니다. 오류: {e}"
-
-    # IP명
-    try:
-        # 'By:' 텍스트를 포함하는 링크를 찾아 IP 이름만 추출
-        ip_name_element = page.locator('a:has-text("By:")')
-        ip_name_text = ip_name_element.inner_text(timeout=3000)
-        ip_name = ip_name_text.replace('By: ', '').strip()
-    except Exception as e:
-        ip_name = f"IP명을 찾을 수 없습니다. 오류: {e}"
-
-    # 제품군
-    try:
-        # 제품 헤더 안에서, /collections/ 또는 /shop/ URL을 포함하는 링크의 p 태그를 찾음
-        category = page.locator('[class*="ProductInfo__ProductHeaderWrapper"] a[href*="/shop/"] p, [class*="ProductInfo__ProductHeaderWrapper"] a[href*="/collections/"] p').first.inner_text(timeout=3000)
-    except Exception as e:
-        category = f"제품군을 찾을 수 없습니다. 오류: {e}"
-
-    # 프로젝트 종료일
-    try:
-        end_date_element = page.locator('[class*="ProductPageCountdown__CountdownDate"]')
-        if end_date_element.count() > 0:
-            end_date_text = end_date_element.inner_text(timeout=3000)
-            end_date = end_date_text.replace('Ends on ', '').strip()
-            status = "진행 중"
-        else:
-            # 종료된 캠페인을 위한 로직 (나중에 구체화)
-            end_date = "해당 없음"
-            status = "종료"
-    except Exception as e:
-        end_date = f"프로젝트 종료일을 찾을 수 없습니다. 오류: {e}"
-        status = f"상태 확인 중 오류: {e}"
-
-    # 판매량 (정확한 선택자 사용)
-    try:
-        # 사용자가 제공한 정확한 선택자 사용
-        sales_locator = page.locator('#__next > div._app__ContainerWrapper-meusgd-0.kPTMSg > div > div._app__ContentWrapper-meusgd-2.hIhdAc > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.bstoHm > div > div:nth-child(3) > div > div.ProgressBarContainer__ProgressRow-sc-1slgn8k-2.dYXbKV > p')
-        if sales_locator.count() > 0:
-            sales_volume = sales_locator.first.inner_text(timeout=3000)
-        else:
-            # 대체 선택자들
-            sales_locator_alt = page.locator(
-                'div.ProgressBarContainer__ProgressRow-sc-1slgn8k-2 p:has-text("sold"), '
-                '[class*="ProgressBarContainer"] p:has-text("sold"), '
-                'p:has-text("sold")'
-            )
-            sales_volume = sales_locator_alt.first.inner_text(timeout=3000)
-    except Exception as e:
-        sales_volume = f"판매량을 찾을 수 없습니다. 오류: {e}"
-        
-    # 달성률
-    try:
-        # '% funded' 텍스트를 포함하는 선택자
-        funded_rate = page.locator('p:has-text("% Funded")').inner_text(timeout=3000)
-    except Exception as e:
-        funded_rate = f"달성률을 찾을 수 없습니다. 오류: {e}"
-
-    # 배송 시작일
-    try:
-        shipping_date = page.locator('[class*="commonFunctions__ShipDateText"]').inner_text(timeout=3000)
-    except Exception as e:
-        shipping_date = f"배송 시작일을 찾을 수 없습니다. 오류: {e}"
-
-    # IP 소개 링크
-    try:
-        # 여러 링크가 있을 수 있으므로 첫 번째 링크를 선택
-        ip_link_elements = page.locator('[class*="CreatorMessage__CreatorMessageWrapper"] a')
-        if ip_link_elements.count() > 0:
-            ip_link = ip_link_elements.first.get_attribute('href', timeout=3000)
-            if ip_link and ip_link.startswith('/'):
-                ip_link = f"https://www.makeship.com{ip_link}"
-        else:
-            ip_link = "IP 소개 링크를 찾을 수 없습니다."
-    except Exception as e:
-        ip_link = f"IP 소개 링크를 찾을 수 없습니다. 오류: {e}"
-
-    # 데이터 딕셔너리 생성
-    product_data = {
-        "제품_URL": url,
-        "진행_여부": status,
-        "제품군": category,
-        "제품명": product_name,
-        "IP명": ip_name,
-        "IP_소개_링크": ip_link,
-        "판매량": sales_volume,
-        "달성률": funded_rate,
-        "프로젝트_종료일": end_date,
-        "배송_시작일": shipping_date
-    }
-    
-    return product_data
-
-def main():
-    # 처리할 URL 리스트 (여기에 URL들을 추가하세요)
-    urls = [
-
+{
+  "후디": [
+    "https://www.makeship.com/products/a-date-with-death-chibi-grim-reaper-hoodie",
+    "https://www.makeship.com/products/a-date-with-death-grim-reaper-hoodie",
+    "https://www.makeship.com/products/anthomnia-hoodie",
+    "https://www.makeship.com/products/efap-halloween-hoodie",
+    "https://www.makeship.com/products/floppy-shoppy-hoodie",
+    "https://www.makeship.com/products/hank-hoodie",
+    "https://www.makeship.com/products/novice-gear-hoodie",
+    "https://www.makeship.com/products/phisnom-anniversary-hoodie",
+    "https://www.makeship.com/products/smoodie",
+    "https://www.makeship.com/products/soma-hoodie",
+    "https://www.makeship.com/products/swordscomic-hoodie",
+    "https://www.makeship.com/products/the-duck-song-hoodie"
+  ],
+  "니트 크루넥": [
+    "https://www.makeship.com/products/cozy-winter-sweater"
+  ],
+  "티셔츠": [
+    "https://www.makeship.com/products/the-classic-insym-shirt",
+    "https://www.makeship.com/products/the-spicy-insym-shirt"
+  ],
+  "에나멜 핀": [
+    "https://www.makeship.com/products/a-date-with-death-grim-azrael-enamel-pin-set",
+    "https://www.makeship.com/products/ace-pride-dual-dragons-enamel-pin-collection",
+    "https://www.makeship.com/products/art-fight-seafoam-vs-stardust-enamel-pins",
+    "https://www.makeship.com/products/art-fight-werewolves-vs-vampires-enamel-pins",
+    "https://www.makeship.com/products/banana-nephews-pin-bundle",
+    "https://www.makeship.com/products/brian-x-devil-enamel-pins",
+    "https://www.makeship.com/products/cherry-blossom-pin-collection",
+    "https://www.makeship.com/products/chocoandpancake-enamel-pin-collection",
+    "https://www.makeship.com/products/church-jorge-enamel-pin-collection",
+    "https://www.makeship.com/products/cove-holden-pins",
+    "https://www.makeship.com/products/dialtown-anniversary-trio-pinset",
+    "https://www.makeship.com/products/dialtown-oliver-randy-enamel-pin-collection",
+    "https://www.makeship.com/products/dialtown-quality-residents-pinset",
+    "https://www.makeship.com/products/dinosaur-couch-pride-enamel-pin-collection",
+    "https://www.makeship.com/products/emotional-support-demon-pins",
+    "https://www.makeship.com/products/enamel-pins-2-pack",
+    "https://www.makeship.com/products/english-pin-pack",
+    "https://www.makeship.com/products/happy-anniversary-till-death-do-us-part-pins",
+    "https://www.makeship.com/products/heraldic-dragon-duo-pins-2-pack",
+    "https://www.makeship.com/products/japan-korea-pins",
+    "https://www.makeship.com/products/lil-pootis-pin-pack",
+    "https://www.makeship.com/products/madness-project-nexus-enamel-pin-collection",
+    "https://www.makeship.com/products/mandela-essentials-pin-set",
+    "https://www.makeship.com/products/mark-of-the-toxic-cesspit-enamel-pin-collection",
+    "https://www.makeship.com/products/medkit-gear-pin-lost-temple-pin",
+    "https://www.makeship.com/products/merica-pin-pack",
+    "https://www.makeship.com/products/moab-and-tack-shooter-pin-pack",
+    "https://www.makeship.com/products/mood-changing-enamel-pins",
+    "https://www.makeship.com/products/mudskipper-pack",
+    "https://www.makeship.com/products/mushling-friends-enamel-pins",
+    "https://www.makeship.com/products/nonbinary-pride-enamel-pin-2-pack",
+    "https://www.makeship.com/products/obey-me-pin-collection-01-lucifer",
+    "https://www.makeship.com/products/obey-me-pin-collection-royal-academy-of-diavolo",
+    "https://www.makeship.com/products/owoster-subject-vi",
+    "https://www.makeship.com/products/pastraspec-enamel-pin-collection",
+    "https://www.makeship.com/products/pig-64-enamel-pin-collection",
+    "https://www.makeship.com/products/pride-pals-enamel-pin-2-pack",
+    "https://www.makeship.com/products/pride-pin-set-2025",
+    "https://www.makeship.com/products/prussia-france-poland-pin-pack",
+    "https://www.makeship.com/products/romania-morocco-pins",
+    "https://www.makeship.com/products/satan-enamel-pin-collection",
+    "https://www.makeship.com/products/shade-enamel-pins",
+    "https://www.makeship.com/products/support-the-sippybreak-enamel-pin-collection",
+    "https://www.makeship.com/products/the-mighty-meatball-enamel-pins-collection",
+    "https://www.makeship.com/products/the-neighbours-enamel-pins-3-pack",
+    "https://www.makeship.com/products/the-tama-trio-pin-pack",
+    "https://www.makeship.com/products/tower-unite-3-pack-of-pins",
+    "https://www.makeship.com/products/trans-pride-dual-dragons-enamel-pin-collection",
+    "https://www.makeship.com/products/twist-pins",
+    "https://www.makeship.com/products/uncanny-valley",
+    "https://www.makeship.com/products/vagrant-value-pack",
+    "https://www.makeship.com/products/vrchat-spookality-pin-set",
+    "https://www.makeship.com/products/welcome-home-enamel-pin-collection",
+    "https://www.makeship.com/products/winged-enamel-pin-set",
+    "https://www.makeship.com/products/ww1-game-series-10-year-anniversary-pins"
+  ],
+  "비닐 피규어": [
+    "https://www.makeship.com/products/5am-pearl-vinyl",
+    "https://www.makeship.com/products/bobicraft-vinyl-figure",
+    "https://www.makeship.com/products/boombox-man-vinyl-figure",
+    "https://www.makeship.com/products/dart-monkey-vinyl-figure",
+    "https://www.makeship.com/products/fringy-vinyl-figure",
+    "https://www.makeship.com/products/gabriel-vinyl-figure",
+    "https://www.makeship.com/products/giovanni-potage-vinyl-figurine",
+    "https://www.makeship.com/products/goblin-vinyl-figure",
+    "https://www.makeship.com/products/grim-figure-a-date-with-death-vinyl",
+    "https://www.makeship.com/products/makebot-vinyl-figure",
+    "https://www.makeship.com/products/malistaire-vinyl-figure",
+    "https://www.makeship.com/products/mauler-vinyl-figure",
+    "https://www.makeship.com/products/merle-ambrose-vinyl-figure",
+    "https://www.makeship.com/products/molly-blyndeff-vinyl-figure",
+    "https://www.makeship.com/products/mushling-vinyl-figure",
+    "https://www.makeship.com/products/phisnom-anniversary-vinyl-figure",
+    "https://www.makeship.com/products/poland-ball-vinyl-figure",
+    "https://www.makeship.com/products/quest-sprout-vinyl-figure",
+    "https://www.makeship.com/products/rags-vinyl-figure",
+    "https://www.makeship.com/products/sharko-vinyl-figure",
+    "https://www.makeship.com/products/the-guy",
+    "https://www.makeship.com/products/the-operator-vinyl-figure",
+    "https://www.makeship.com/products/vrcat-vinyl",
+    "https://www.makeship.com/products/wizard-monkey-vinyl-figure"
+  ],
+  "플러시": [
+    "https://www.makeship.com/products/abyssgard",
+    "https://www.makeship.com/products/ace-the-tv",
+    "https://www.makeship.com/products/andre",
+    "https://www.makeship.com/products/aquwa-plush",
+    "https://www.makeship.com/products/arlyluche",
+    "https://www.makeship.com/products/bijou-1",
+    "https://www.makeship.com/products/boog-plushie",
+    "https://www.makeship.com/products/bumblepurr-plushie",
+    "https://www.makeship.com/products/bunrio-plushie",
+    "https://www.makeship.com/products/busy-cat",
+    "https://www.makeship.com/products/callum-crown-plush",
+    "https://www.makeship.com/products/canehdian-plushie",
+    "https://www.makeship.com/products/car-plushie",
+    "https://www.makeship.com/products/cat-plushie",
+    "https://www.makeship.com/products/celeste",
+    "https://www.makeship.com/products/celine",
+    "https://www.makeship.com/products/chameleon-girl",
+    "https://www.makeship.com/products/chance-plush",
+    "https://www.makeship.com/products/creepin-gecko-plushie",
+    "https://www.makeship.com/products/cringygull-plushie",
+    "https://www.makeship.com/products/dave-plushie",
+    "https://www.makeship.com/products/doug-plushie",
+    "https://www.makeship.com/products/enderking-bubi-plush",
+    "https://www.makeship.com/products/ethel-the-oiia-cat-plushie",
+    "https://www.makeship.com/products/garden-variety-finn-plushie",
+    "https://www.makeship.com/products/hollow-thing-plushie",
+    "https://www.makeship.com/products/hoshi-plushie",
+    "https://www.makeship.com/products/infected-plush",
+    "https://www.makeship.com/products/infernal-lord-plushie",
+    "https://www.makeship.com/products/irvine",
+    "https://www.makeship.com/products/j-j-plushie",
+    "https://www.makeship.com/products/jessica-locke-plushie",
+    "https://www.makeship.com/products/jigsaw",
+    "https://www.makeship.com/products/kapi-work-outfit-plushie",
+    "https://www.makeship.com/products/kitanya_is_here-plushie",
+    "https://www.makeship.com/products/kumi-plushie",
+    "https://www.makeship.com/products/lampert-plush",
+    "https://www.makeship.com/products/levi-plushie",
+    "https://www.makeship.com/products/lucifer-v2-plushie",
+    "https://www.makeship.com/products/lucille",
+    "https://www.makeship.com/products/mag",
+    "https://www.makeship.com/products/majestic-unicorn-pride-plushie",
+    "https://www.makeship.com/products/manon-plush",
+    "https://www.makeship.com/products/medkit-plush",
+    "https://www.makeship.com/products/millions-to-one-darkviperau-plushie",
+    "https://www.makeship.com/products/mirabelle-plush",
+    "https://www.makeship.com/products/miracle-machine",
+    "https://www.makeship.com/products/mischief-plushie",
+    "https://www.makeship.com/products/moco",
+    "https://www.makeship.com/products/nerissa-ravencroft-plush",
+    "https://www.makeship.com/products/panama-plushie",
+    "https://www.makeship.com/products/penny-plushie",
+    "https://www.makeship.com/products/pillowdear-nurse-plushie",
+    "https://www.makeship.com/products/planethumans-neptune-plushie",
+    "https://www.makeship.com/products/plushvi",
+    "https://www.makeship.com/products/pparu-plushie",
+    "https://www.makeship.com/products/prism-apollo-plushie",
+    "https://www.makeship.com/products/psycho-potato-plushie",
+    "https://www.makeship.com/products/reef-plush",
+    "https://www.makeship.com/products/rockalina-plushie",
+    "https://www.makeship.com/products/rody-plush-2-0",
+    "https://www.makeship.com/products/saturn-cat-plushie",
+    "https://www.makeship.com/products/shiori",
+    "https://www.makeship.com/products/sinuuki-plushie",
+    "https://www.makeship.com/products/snecko-plushie",
+    "https://www.makeship.com/products/tieflingmelissa",
+    "https://www.makeship.com/products/tilly-plushy",
+    "https://www.makeship.com/products/toad-plushie",
+    "https://www.makeship.com/products/too-much-coffee-frog-plushie",
+    "https://www.makeship.com/products/ultrakill-gabriel-plush",
+    "https://www.makeship.com/products/ultraplush-v1",
+    "https://www.makeship.com/products/ultraplush-v2",
+    "https://www.makeship.com/products/uniform-audrey",
+    "https://www.makeship.com/products/unsuur-plushie",
+    "https://www.makeship.com/products/vicksy-sitting-fox-plush",
+    "https://www.makeship.com/products/vince-plush-2-0",
+    "https://www.makeship.com/products/wisteria-dryad-plushie",
+    "https://www.makeship.com/products/wizcat-plush",
+    "https://www.makeship.com/products/wolfgang-seamus-2-0-plushie",
+    "https://www.makeship.com/products/x-event-plushie-1",
+    "https://www.makeship.com/products/yuchi-plushie",
+    "https://www.makeship.com/products/z-13-sebastian-solace-2-0-plushie",
+    "https://www.makeship.com/products/zed-dog"
+  ],
+  "롱보이": [
+    "https://www.makeship.com/products/banana-gecko-longboi",
+    "https://www.makeship.com/products/nonbinary-dragon-longboi",
+    "https://www.makeship.com/products/trans-rights-dragon-longboi"
+  ],
+  "도우보이": [
+    "https://www.makeship.com/products/a-date-with-death-azrael-huggable-plush",
+    "https://www.makeship.com/products/crumb-doughboi",
+    "https://www.makeship.com/products/cubified-turnip-boy-doughboi",
+    "https://www.makeship.com/products/doughboi-dart-monkey",
+    "https://www.makeship.com/products/dr-retro-doughboi",
+    "https://www.makeship.com/products/gremlin-the-blep-doughboi-plushie",
+    "https://www.makeship.com/products/jumbo-shrimpster",
+    "https://www.makeship.com/products/monke-doughboi"
+  ],
+  "점보 플러시": [
+    "https://www.makeship.com/products/greenland-jumbo-plushie",
+    "https://www.makeship.com/products/zelda-jumbo-plushie"
+  ],
+  "키체인 플러시": [
+    "https://www.makeship.com/products/blin-keychain-companions",
+    "https://www.makeship.com/products/blue-jeffling-keychain",
+    "https://www.makeship.com/products/change-god-keychain",
+    "https://www.makeship.com/products/charlie-mini-plushie-keychain",
+    "https://www.makeship.com/products/chef-honey-keychain",
+    "https://www.makeship.com/products/comandius-salchichas",
+    "https://www.makeship.com/products/cowboy-lil-posso-keychain",
+    "https://www.makeship.com/products/dinot-keychain",
+    "https://www.makeship.com/products/edd-mini-plushie-keychain",
+    "https://www.makeship.com/products/emotional-support-demon-gitd-keychain",
+    "https://www.makeship.com/products/emotional-support-demon-keychain",
+    "https://www.makeship.com/products/evan-and-katelyn-keychain-bundle",
+    "https://www.makeship.com/products/family-pack-keychain",
+    "https://www.makeship.com/products/fly-agaric-keychain-plushie",
+    "https://www.makeship.com/products/frog-keychain-plushie",
+    "https://www.makeship.com/products/gnome-child-keychain-plushie",
+    "https://www.makeship.com/products/green-jeffling-keychain",
+    "https://www.makeship.com/products/honeybun",
+    "https://www.makeship.com/products/human1-keychain",
+    "https://www.makeship.com/products/inky-cap-keychain-plushie",
+    "https://www.makeship.com/products/juno-birch-keychain",
+    "https://www.makeship.com/products/keyush-keychain",
+    "https://www.makeship.com/products/kiru-keychain-plushie-with-reusable-bag",
+    "https://www.makeship.com/products/lil-posso-keychain",
+    "https://www.makeship.com/products/mango-gitd-keychain",
+    "https://www.makeship.com/products/mango-keychain",
+    "https://www.makeship.com/products/mimi-keychain",
+    "https://www.makeship.com/products/mini-pixel-plush",
+    "https://www.makeship.com/products/mini-sophie-plush",
+    "https://www.makeship.com/products/monke-keychain",
+    "https://www.makeship.com/products/neqo-keychain",
+    "https://www.makeship.com/products/pank2go-scarf-keychain",
+    "https://www.makeship.com/products/peglin-plush-keychain",
+    "https://www.makeship.com/products/pud-the-pride-dino-plush-keychain",
+    "https://www.makeship.com/products/red-jeffling-keychain",
+    "https://www.makeship.com/products/sebastian-keychain",
+    "https://www.makeship.com/products/sherpa-mini-plushie-keychain",
+    "https://www.makeship.com/products/tater-tot-mini-plushie-keychain",
+    "https://www.makeship.com/products/the-duck-mini-plushie-keychain",
+    "https://www.makeship.com/products/the-grapes-mini-plushie-keychain",
+    "https://www.makeship.com/products/the-lemonade-mini-plushie-keychain",
+    "https://www.makeship.com/products/toras-keychain",
+    "https://www.makeship.com/products/willy-mini-plushie-keychain",
+    "https://www.makeship.com/products/winky-the-dwarf-cat-keychain",
+    "https://www.makeship.com/products/wise-old-man-keychain-plushie"
+  ],
+  "인기 상품": [
+    "https://www.makeship.com/products/abyssgard",
+    "https://www.makeship.com/products/ace-the-tv",
+    "https://www.makeship.com/products/andre",
+    "https://www.makeship.com/products/anthomnia-hoodie",
+    "https://www.makeship.com/products/aquwa-plush",
+    "https://www.makeship.com/products/banana-gecko-longboi",
+    "https://www.makeship.com/products/bijou-1",
+    "https://www.makeship.com/products/busy-cat",
+    "https://www.makeship.com/products/callum-crown-plush",
+    "https://www.makeship.com/products/canehdian-plushie",
+    "https://www.makeship.com/products/celeste",
+    "https://www.makeship.com/products/celine",
+    "https://www.makeship.com/products/chameleon-girl",
+    "https://www.makeship.com/products/cringygull-plushie",
+    "https://www.makeship.com/products/dave-plushie",
+    "https://www.makeship.com/products/doug-plushie",
+    "https://www.makeship.com/products/ethel-the-oiia-cat-plushie",
+    "https://www.makeship.com/products/garden-variety-finn-plushie",
+    "https://www.makeship.com/products/greenland-jumbo-plushie",
+    "https://www.makeship.com/products/hollow-thing-plushie",
+    "https://www.makeship.com/products/honeybun",
+    "https://www.makeship.com/products/hoshi-plushie",
+    "https://www.makeship.com/products/infected-plush",
+    "https://www.makeship.com/products/j-j-plushie",
+    "https://www.makeship.com/products/jessica-locke-plushie",
+    "https://www.makeship.com/products/kitanya_is_here-plushie",
+    "https://www.makeship.com/products/kumi-plushie",
+    "https://www.makeship.com/products/lampert-plush",
+    "https://www.makeship.com/products/levi-plushie",
+    "https://www.makeship.com/products/lucifer-v2-plushie",
+    "https://www.makeship.com/products/lucille",
+    "https://www.makeship.com/products/mag",
+    "https://www.makeship.com/products/majestic-unicorn-pride-plushie",
+    "https://www.makeship.com/products/manon-plush",
+    "https://www.makeship.com/products/medkit-gear-pin-lost-temple-pin",
+    "https://www.makeship.com/products/medkit-plush",
+    "https://www.makeship.com/products/millions-to-one-darkviperau-plushie",
+    "https://www.makeship.com/products/mimi-keychain",
+    "https://www.makeship.com/products/mirabelle-plush",
+    "https://www.makeship.com/products/mischief-plushie",
+    "https://www.makeship.com/products/moco",
+    "https://www.makeship.com/products/nerissa-ravencroft-plush",
+    "https://www.makeship.com/products/nonbinary-dragon-longboi",
+    "https://www.makeship.com/products/nonbinary-pride-enamel-pin-2-pack",
+    "https://www.makeship.com/products/owoster-subject-vi",
+    "https://www.makeship.com/products/panama-plushie",
+    "https://www.makeship.com/products/penny-plushie",
+    "https://www.makeship.com/products/pillowdear-nurse-plushie",
+    "https://www.makeship.com/products/pparu-plushie",
+    "https://www.makeship.com/products/pride-pin-set-2025",
+    "https://www.makeship.com/products/prism-apollo-plushie",
+    "https://www.makeship.com/products/psycho-potato-plushie",
+    "https://www.makeship.com/products/reef-plush",
+    "https://www.makeship.com/products/rockalina-plushie",
+    "https://www.makeship.com/products/rody-plush-2-0",
+    "https://www.makeship.com/products/saturn-cat-plushie",
+    "https://www.makeship.com/products/sherpa-mini-plushie-keychain",
+    "https://www.makeship.com/products/shiori",
+    "https://www.makeship.com/products/sinuuki-plushie",
+    "https://www.makeship.com/products/snecko-plushie",
+    "https://www.makeship.com/products/tieflingmelissa",
+    "https://www.makeship.com/products/tilly-plushy",
+    "https://www.makeship.com/products/trans-rights-dragon-longboi",
+    "https://www.makeship.com/products/unsuur-plushie",
+    "https://www.makeship.com/products/vicksy-sitting-fox-plush",
+    "https://www.makeship.com/products/vince-plush-2-0",
+    "https://www.makeship.com/products/wizcat-plush",
+    "https://www.makeship.com/products/wolfgang-seamus-2-0-plushie",
+    "https://www.makeship.com/products/x-event-plushie-1",
+    "https://www.makeship.com/products/yuchi-plushie",
+    "https://www.makeship.com/products/zed-dog",
+    "https://www.makeship.com/products/zelda-jumbo-plushie"
+  ],
+  "신상품": [
+    "https://www.makeship.com/products/andre",
+    "https://www.makeship.com/products/banana-gecko-longboi",
+    "https://www.makeship.com/products/bunrio-plushie",
+    "https://www.makeship.com/products/car-plushie",
+    "https://www.makeship.com/products/cat-plushie",
+    "https://www.makeship.com/products/celeste",
+    "https://www.makeship.com/products/celine",
+    "https://www.makeship.com/products/cringygull-plushie",
+    "https://www.makeship.com/products/edd-mini-plushie-keychain",
+    "https://www.makeship.com/products/infected-plush",
+    "https://www.makeship.com/products/infernal-lord-plushie",
+    "https://www.makeship.com/products/kapi-work-outfit-plushie",
+    "https://www.makeship.com/products/lampert-plush",
+    "https://www.makeship.com/products/miracle-machine",
+    "https://www.makeship.com/products/pillowdear-nurse-plushie",
+    "https://www.makeship.com/products/saturn-cat-plushie",
+    "https://www.makeship.com/products/the-classic-insym-shirt",
+    "https://www.makeship.com/products/the-neighbours-enamel-pins-3-pack",
+    "https://www.makeship.com/products/the-spicy-insym-shirt",
+    "https://www.makeship.com/products/z-13-sebastian-solace-2-0-plushie"
+  ],
+  "출시 예정": [
+    "https://www.makeship.com/products/1-pixel-firefly-plushie",
+    "https://www.makeship.com/products/a-date-with-death-grim-reaper-standing-plushie",
+    "https://www.makeship.com/products/absolute-cinema-plushie",
+    "https://www.makeship.com/products/aloha-cat-plush",
+    "https://www.makeship.com/products/avoryx-the-wicked",
+    "https://www.makeship.com/products/dalilah-and-medjed",
+    "https://www.makeship.com/products/iris-plushie",
+    "https://www.makeship.com/products/kaho-w-baguette",
+    "https://www.makeship.com/products/lillie-belle",
+    "https://www.makeship.com/products/little-spit",
+    "https://www.makeship.com/products/meesh-plushie",
+    "https://www.makeship.com/products/mercury-plushie",
+    "https://www.makeship.com/products/mini-pixel-plush",
+    "https://www.makeship.com/products/mini-sophie-plush",
+    "https://www.makeship.com/products/piss-cat-lov-plushie",
+    "https://www.makeship.com/products/psychopomp-v2-plushie",
+    "https://www.makeship.com/products/rog-knight-plush",
+    "https://www.makeship.com/products/shark-mage-matt",
+    "https://www.makeship.com/products/tri-color-hognose-plushie",
+    "https://www.makeship.com/products/winged-enamel-pin-set"
+  ],
+  "지난 상품": [
     "https://www.makeship.com/products/1-grit",
     "https://www.makeship.com/products/1-grit-jumbo-plush-2-0",
     "https://www.makeship.com/products/10th-anniversary-engineer-plush",
@@ -920,61 +1178,5 @@ def main():
     "https://www.makeship.com/products/zombie-clyde-gitd-plush",
     "https://www.makeship.com/products/zombie-emotional-support-demon-plushie",
     "https://www.makeship.com/products/zomg-jumbo-plush"
-
-    ]
-    
-    all_products_data = []
-    
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
-        stealth_sync(page)
-        
-        for i, url in enumerate(urls, 1):
-            print(f"\n=== 제품 {i}/{len(urls)} 처리 중 ===")
-            print(f"URL: {url}")
-            
-            product_data = extract_product_data(page, url)
-            
-            if product_data:
-                all_products_data.append(product_data)
-                
-                # 개별 제품 정보 출력
-                print("--- 추출된 정보 ---")
-                print(f"진행 여부: {product_data['진행_여부']}")
-                print(f"제품군: {product_data['제품군']}")
-                print(f"제품명: {product_data['제품명']}")
-                print(f"IP명: {product_data['IP명']}")
-                print(f"IP 소개 링크: {product_data['IP_소개_링크']}")
-                print(f"판매량: {product_data['판매량']}")
-                print(f"달성률: {product_data['달성률']}")
-                print(f"프로젝트 종료일: {product_data['프로젝트_종료일']}")
-                print(f"배송 시작일: {product_data['배송_시작일']}")
-            else:
-                print(f"제품 데이터 추출 실패: {url}")
-        
-        browser.close()
-    
-    # 모든 데이터를 하나의 JSON 파일로 저장
-    if all_products_data:
-        final_data = {
-            "추출_시간": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "총_제품_수": len(all_products_data),
-            "제품_목록": all_products_data
-        }
-        
-        # 파일명에 현재 시간 포함
-        filename = f"makeship_all_products_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        
-        try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(final_data, f, ensure_ascii=False, indent=2)
-            print(f"\n=== 완료 ===")
-            print(f"총 {len(all_products_data)}개 제품의 데이터가 '{filename}' 파일로 저장되었습니다.")
-        except Exception as e:
-            print(f"\nJSON 파일 저장 중 오류 발생: {e}")
-    else:
-        print("\n추출된 데이터가 없습니다.")
-
-if __name__ == '__main__':
-    main()
+  ]
+}

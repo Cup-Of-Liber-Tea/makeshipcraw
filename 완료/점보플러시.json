@@ -1,0 +1,30 @@
+{
+  "추출_시간": "2025-06-29 16:56:08",
+  "총_제품_수": 2,
+  "제품_목록": [
+    {
+      "제품_URL": "https://www.makeship.com/products/greenland-jumbo-plushie",
+      "진행_여부": "진행 중",
+      "제품군": "Visit Drew Durnil Store",
+      "제품명": "Greenland Jumbo Plushie",
+      "IP명": "Drew Durnil",
+      "IP_소개_링크": "https://www.youtube.com/user/BAStartGaming/about",
+      "판매량": "799 sold",
+      "달성률": "399% Funded",
+      "프로젝트_종료일": "July 5, 1:00AM GMT+9",
+      "배송_시작일": "Ships September 27, 2025"
+    },
+    {
+      "제품_URL": "https://www.makeship.com/products/zelda-jumbo-plushie",
+      "진행_여부": "진행 중",
+      "제품군": "Jumbo Plush",
+      "제품명": "Zelda Jumbo Plushie",
+      "IP명": "Tarantula Kat",
+      "IP_소개_링크": "https://www.youtube.com/c/tarantulakat/featured",
+      "판매량": "891 sold",
+      "달성률": "445% Funded",
+      "프로젝트_종료일": "July 1, 12:00PM GMT+9",
+      "배송_시작일": "Ships September 23, 2025"
+    }
+  ]
+}

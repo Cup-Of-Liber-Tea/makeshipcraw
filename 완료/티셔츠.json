@@ -1,0 +1,30 @@
+{
+  "추출_시간": "2025-06-29 16:28:38",
+  "총_제품_수": 2,
+  "제품_목록": [
+    {
+      "제품_URL": "https://www.makeship.com/products/the-classic-insym-shirt",
+      "진행_여부": "진행 중",
+      "제품군": "T-Shirt",
+      "제품명": "The Classic Insym Shirt",
+      "IP명": "Insym",
+      "IP_소개_링크": "https://www.twitch.tv/insym",
+      "판매량": "502 sold",
+      "달성률": "167% Funded",
+      "프로젝트_종료일": "July 16, 1:00AM GMT+9",
+      "배송_시작일": "Ships September 18, 2025"
+    },
+    {
+      "제품_URL": "https://www.makeship.com/products/the-spicy-insym-shirt",
+      "진행_여부": "진행 중",
+      "제품군": "T-Shirt",
+      "제품명": "The Spicy Insym Shirt",
+      "IP명": "Insym",
+      "IP_소개_링크": "https://www.youtube.com/c/Insym/videos",
+      "판매량": "419 sold",
+      "달성률": "139% Funded",
+      "프로젝트_종료일": "July 16, 1:00AM GMT+9",
+      "배송_시작일": "Ships September 18, 2025"
+    }
+  ]
+}

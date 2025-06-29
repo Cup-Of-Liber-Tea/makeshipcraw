@@ -1,0 +1,42 @@
+{
+  "추출_시간": "2025-06-29 16:37:21",
+  "총_제품_수": 3,
+  "제품_목록": [
+    {
+      "제품_URL": "https://www.makeship.com/products/banana-gecko-longboi",
+      "진행_여부": "진행 중",
+      "제품군": "Longboi",
+      "제품명": "Banana Gecko Longboi",
+      "IP명": "Zentreya",
+      "IP_소개_링크": "https://www.twitch.tv/zentreya",
+      "판매량": "",
+      "달성률": "100%+ Funded",
+      "프로젝트_종료일": "July 20, 2:00AM GMT+9",
+      "배송_시작일": "Ships October 12, 2025"
+    },
+    {
+      "제품_URL": "https://www.makeship.com/products/nonbinary-dragon-longboi",
+      "진행_여부": "진행 중",
+      "제품군": "Visit thingsby_diana Store",
+      "제품명": "Nonbinary Dragon Longboi",
+      "IP명": "thingsby_diana",
+      "IP_소개_링크": "https://www.instagram.com/thingsby_diana/",
+      "판매량": "819 sold",
+      "달성률": "409% Funded",
+      "프로젝트_종료일": "July 1, 10:00AM GMT+9",
+      "배송_시작일": "Ships September 23, 2025"
+    },
+    {
+      "제품_URL": "https://www.makeship.com/products/trans-rights-dragon-longboi",
+      "진행_여부": "진행 중",
+      "제품군": "Longboi",
+      "제품명": "Trans Rights Dragon Longboi",
+      "IP명": "SOVKA",
+      "IP_소개_링크": "https://x.com/monsterSOVKA?t=bCvgIhJvnglckBOt4TR_og&s=09",
+      "판매량": "609 sold",
+      "달성률": "304% Funded",
+      "프로젝트_종료일": "July 5, 12:00PM GMT+9",
+      "배송_시작일": "Ships September 27, 2025"
+    }
+  ]
+}
