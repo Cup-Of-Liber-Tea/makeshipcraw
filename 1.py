@@ -1,5 +1,5 @@
 from playwright.sync_api import sync_playwright, TimeoutError
-from playwright_stealth import stealth_sync
+from playwright_stealth.stealth import Stealth, ALL_EVASIONS_DISABLED_KWARGS
 import json
 from datetime import datetime
 
@@ -928,7 +928,7 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         page = browser.new_page()
-        stealth_sync(page)
+        Stealth(page, ALL_EVASIONS_DISABLED_KWARGS).apply()
         
         for i, url in enumerate(urls, 1):
             print(f"\n=== 제품 {i}/{len(urls)} 처리 중 ===")

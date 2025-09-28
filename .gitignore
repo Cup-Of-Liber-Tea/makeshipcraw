@@ -1,0 +1,11 @@
+*.txt
+*.xlsx
+*.csv
+*.json
+*.xml
+*.html
+*.css
+*.js
+*.php
+*.pyc
+*.pyo
