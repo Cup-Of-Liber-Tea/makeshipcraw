@@ -5,30 +5,17 @@ from datetime import datetime
 import glob
 
 def load_json_files():
-    """현재 폴더의 한글 파일명 JSON 파일들을 로드"""
-    # 한글 파일명을 가진 JSON 파일들을 명시적으로 지정
-    korean_json_files = [
-        '플러시.json',
-        '키체인플러시.json', 
-        '인기상품.json',
-        '에나멜핀.json',
-        '신상품.json',
-        '출시예정.json',
-        '점보플러시.json',
-        '비닐피규어.json',
-        '후디.json',
-        '롱보이.json',
-        '도우보이.json',
-        '티셔츠.json',
-        '니트_크루넥.json',
-        '지난상품.json'
-    ]
+    """현재 폴더의 Makeship 관련 JSON 파일들을 로드"""
+    # 'makeship_all_products_YYYYMMDD_HHMMSS.json' 패턴과 'makeship_[카테고리]_[타임스탬프].json' 패턴의 파일들을 모두 찾음
+    json_files = glob.glob('makeship_all_products_*.json') + \
+                 glob.glob('makeship_*_*.json') # 모든 makeship_로 시작하는 json 파일 포함 (카테고리별 파일 포함)
     
-    # 실제 존재하는 파일들만 필터링
-    json_files = [f for f in korean_json_files if os.path.exists(f)]
+    # 중복 제거 및 정렬
+    json_files = sorted(list(set(json_files)))
+
     all_data = []
     
-    print(f"발견된 한글 JSON 파일: {len(json_files)}개")
+    print(f"발견된 Makeship JSON 파일: {len(json_files)}개")
     
     for json_file in json_files:
         try:
@@ -39,16 +26,85 @@ def load_json_files():
             if '제품_목록' in data:
                 products = data['제품_목록']
                 print(f"{json_file}: {len(products)}개 제품")
-                all_data.extend(products)
             else:
-                # 단일 제품 데이터인 경우
-                print(f"{json_file}: 단일 제품")
-                all_data.append(data)
+                # 단일 제품 데이터인 경우 (과거 파일 형식 호환)
+                print(f"{json_file}: 단일 제품 또는 알 수 없는 형식")
+                products = [data]
+
+            # 각 제품 데이터에 대해 형식 변환 적용
+            for product in products:
+                if '프로젝트_종료일' in product: # 프로젝트 종료일 날짜 형식 변환
+                    product['프로젝트_종료일'] = normalize_date(product['프로젝트_종료일'])
+                if '배송_시작일' in product: # 배송 시작일 날짜 형식 변환
+                    product['배송_시작일'] = normalize_date(product['배송_시작일'])
+                if '판매량' in product: # 판매량 숫자 형식 변환
+                    product['판매량'] = convert_to_numeric(product['판매량'])
+                if '달성률' in product: # 달성률 숫자 형식 변환
+                    product['달성률'] = convert_to_numeric(product['달성률'])
+                
+                all_data.extend(products)
                 
         except Exception as e:
             print(f"{json_file} 로드 중 오류: {e}")
     
     return all_data, json_files
+
+def normalize_date(date_str):
+    """
+    다양한 날짜 문자열 형식을 'YYYY-MM-DD' 형식으로 변환합니다.
+    - 'July 1, 5:00AM GMT+9 / Ships September 23, 2025'
+    - 'September 17, 2022'
+    - 'July 1, 2022'
+    등을 처리할 수 있도록 개선합니다.
+    """
+    if not date_str or date_str == '정보 없음':
+        return '정보 없음'
+
+    # ' / ' 기준으로 나누어 프로젝트 종료일과 배송 시작일 분리
+    parts = date_str.split(' / ')
+    
+    # 프로젝트 종료일 처리 (첫 번째 부분)
+    project_end_date_part = parts[0].strip()
+    try:
+        # '5:00AM GMT+9'와 같은 시간/GMT 정보 제거
+        project_end_date_clean = ' '.join(project_end_date_part.split(' ')[:3])
+        # 'July 1, 2022' 형식 파싱
+        dt_object = datetime.strptime(project_end_date_clean.replace(',', ''), '%B %d %Y')
+        return dt_object.strftime('%Y-%m-%d')
+    except ValueError:
+        pass # 파싱 실패 시 다음 형식 시도
+
+    # 'Ships September 23, 2025' 같은 형식 처리
+    if 'Ships ' in date_str:
+        ship_date_part = date_str.split('Ships ')[-1].strip()
+        try:
+            # 'September 23, 2025' 형식 파싱
+            dt_object = datetime.strptime(ship_date_part.replace(',', ''), '%B %d %Y')
+            return dt_object.strftime('%Y-%m-%d')
+        except ValueError:
+            pass # 파싱 실패 시 다음 형식 시도
+    
+    # Fallback: 일반적인 날짜 형식 시도
+    try:
+        dt_object = datetime.strptime(date_str.replace(',', ''), '%B %d %Y')
+        return dt_object.strftime('%Y-%m-%d')
+    except ValueError:
+        return '정보 없음'
+
+def convert_to_numeric(value_str):
+    """문자열에서 숫자만 추출하여 정수 또는 실수로 변환합니다."""
+    if not value_str or value_str == '정보 없음' or not isinstance(value_str, str):
+        return 0
+
+    clean_value = value_str.replace(',', '').replace(' sold', '').strip()
+    try:
+        # 달성률 (%)가 포함된 경우
+        if '%' in clean_value:
+            return float(clean_value.replace('%', ''))
+        else:
+            return int(clean_value)
+    except ValueError:
+        return 0
 
 def remove_duplicates_by_url(products):
     """제품 URL로 중복 제거 (최신 데이터 유지)"""
@@ -79,8 +135,10 @@ def create_excel_from_products(products, filename):
         '제품명',
         'IP명',
         'IP_소개_링크',
+        '제품_가격',
         '판매량',
         '달성률',
+        '매출',
         '프로젝트_종료일',
         '배송_시작일'
     ]
@@ -88,6 +146,13 @@ def create_excel_from_products(products, filename):
     # 존재하는 컬럼만 선택
     available_columns = [col for col in column_order if col in df.columns]
     df = df[available_columns]
+
+    # 숫자형 컬럼 강제 변환 (에러 발생 시 0으로 처리)
+    for col in ['판매량', '달성률', '매출']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+    # 날짜 컬럼은 변환된 문자열 형식으로 유지
     
     # 엑셀 파일로 저장
     try:

@@ -1,969 +1,599 @@
-from playwright.sync_api import sync_playwright, TimeoutError
-from playwright_stealth.stealth import Stealth, ALL_EVASIONS_DISABLED_KWARGS
+from playwright.async_api import async_playwright, TimeoutError # 변경
+from playwright_stealth import Stealth # 변경
 import json
 from datetime import datetime
+import glob
+import os
+import re # 정규 표현식 모듈 추가
+import asyncio # 비동기 처리를 위해 asyncio 모듈 추가
 
-def extract_product_data(page, url):
-    """단일 제품 페이지에서 데이터를 추출하는 함수"""
+# 제품군별 가격 매핑 (달러 기준)
+CATEGORY_PRICES = {
+    "hoodies": 59.99,
+    "knitted crewnecks": 59.99,
+    "t-shirts": 29.99,
+    "enamel pins": 19.99,
+    "vinyl figures": 29.99,
+    "plushies": 29.99,
+    "longbois": 36.99,
+    "doughbois": 39.99,
+    "jumbo plushies": 39.99,
+    "keychain plushies": 15.99,
+    "sweatpants": 54.99,
+    "ball cap": 24.99,
+    # 한국어 제품군명도 추가 (혹시 모를 경우를 대비)
+    "후디": 59.99,
+    "니트 크루넥": 59.99,
+    "티셔츠": 29.99,
+    "에나멜 핀": 19.99,
+    "비닐 피규어": 29.99,
+    "플러시": 29.99,
+    "롱보이": 36.99,
+    "도우보이": 39.99,
+    "점보 플러시": 39.99,
+    "키체인 플러시": 15.99,
+    "스웨트팬츠": 54.99,
+    "볼 캡": 24.99
+}
+
+def get_category_price(category):
+    """제품군에 따른 가격을 반환합니다."""
+    if not category or category == "제품군을 찾을 수 없습니다.":
+        return 0.0
+    
+    # 소문자로 변환하여 매칭
+    category_lower = category.lower()
+    
+    # 직접 매칭 시도
+    if category_lower in CATEGORY_PRICES:
+        return CATEGORY_PRICES[category_lower]
+    
+    # 부분 매칭 시도 (예: "Hoodies" -> "hoodies")
+    for key in CATEGORY_PRICES:
+        if key in category_lower or category_lower in key:
+            return CATEGORY_PRICES[key]
+    
+    # 매칭되지 않는 경우 기본값 반환
+    print(f"경고: 제품군 '{category}'에 대한 가격 정보를 찾을 수 없습니다.")
+    return 29.99  # 기본값으로 플러시 가격 사용
+
+def calculate_revenue(sales_volume, category, product_price):
+    """판매량, 제품군, 실제 제품 가격을 기반으로 매출을 계산합니다."""
     try:
+        # 판매량이 숫자가 아닌 경우 처리
+        if not sales_volume or sales_volume in ["판매량 정보를 찾을 수 없습니다.", "Sold Out"]:
+            return 0.0
+        
+        # 판매량에서 숫자만 추출
+        sales_match = re.search(r'(\d+)', str(sales_volume).replace(',', ''))
+        if sales_match:
+            sales_count = int(sales_match.group(1))
+            
+            # 실제 크롤링한 가격이 있으면 사용, 없으면 제품군별 하드코딩 가격 사용
+            actual_price = 0.0
+            if product_price and product_price != "가격을 찾을 수 없습니다.":
+                # 크롤링한 가격에서 숫자만 추출
+                price_match = re.search(r'(\d+\.?\d*)', str(product_price).replace(',', ''))
+                if price_match:
+                    actual_price = float(price_match.group(1))
+            
+            # 실제 가격이 없거나 0이면 제품군별 하드코딩 가격 사용
+            if actual_price == 0.0:
+                actual_price = get_category_price(category)
+                print(f"제품군 '{category}' 하드코딩 가격 사용: ${actual_price}")
+            
+            # 판매량이 'Sold Out'일 경우, 추정 가격에 1000을 곱하여 매출 계산
+            if sales_volume == "Sold Out":
+                estimated_price = get_category_price(category)
+                revenue = sales_count * (estimated_price * 1000) # 추정 가격에 1000을 곱하여 매출 계산
+                print(f"판매량이 'Sold Out'일 경우, 제품군 '{category}'의 추정 가격 ${estimated_price}에 1000을 곱하여 매출을 계산했습니다.")
+                return round(revenue, 2)
+            
+            revenue = sales_count * actual_price
+            return round(revenue, 2)
+        else:
+            return 0.0
+    except Exception as e:
+        print(f"매출 계산 중 오류: {e}")
+        return 0.0
+
+def process_sales_data(sales_raw_text, funded_raw_text):
+    processed_sales = "판매량 정보를 찾을 수 없습니다."
+    processed_rate = "달성률 정보를 찾을 수 없습니다."
+
+    # 1. 판매량 파싱
+    if sales_raw_text and sales_raw_text != "제품군을 찾을 수 없습니다.":
+        sold_of_pattern = r'([0-9,]+)\s+of\s+([0-9,]+)\s+sold'
+        sold_of_match = re.search(sold_of_pattern, sales_raw_text, re.IGNORECASE)
+        if sold_of_match:
+            processed_sales = sold_of_match.group(1).replace(',', '')
+        else:
+            sold_only_pattern = r'([0-9,]+)\s+sold'
+            sold_only_match = re.search(sold_only_pattern, sales_raw_text, re.IGNORECASE)
+            if sold_only_match:
+                processed_sales = sold_only_match.group(1).replace(',', '')
+            elif "Sold Out" in sales_raw_text:
+                processed_sales = "Sold Out"
+
+    # 2. 달성률 파싱
+    if funded_raw_text and funded_raw_text != "제품군을 찾을 수 없습니다.":
+        funded_pattern = r'([0-9,]+%)\s+Funded'
+        funded_match = re.search(funded_pattern, funded_raw_text, re.IGNORECASE)
+        if funded_match:
+            processed_rate = funded_match.group(1).replace(',', '')
+        elif "Sold Out" in funded_raw_text:
+            processed_rate = "Sold Out"
+
+    # 3. 판매량 기반 달성률 계산 (X of Y sold -> X/Y 비율)
+    if processed_sales != "판매량 정보를 찾을 수 없습니다." and processed_sales != "Sold Out" and "of" in sales_raw_text:
+        sold_of_pattern = r'([0-9,]+)\s+of\s+([0-9,]+)\s+sold'
+        sold_of_match = re.search(sold_of_pattern, sales_raw_text, re.IGNORECASE)
+        if sold_of_match:
+            x_val = int(sold_of_match.group(1).replace(',', ''))
+            y_val_str = sold_of_match.group(2).replace(',', '')
+            y_val = int(y_val_str) if y_val_str.isdigit() else 0
+            if y_val > 0:
+                processed_rate = f"{(x_val / y_val * 100):.1f}%"
+            else:
+                processed_rate = "0.0%"
+
+    # 모든 정보가 없을 경우 최종적으로 Sold Out 처리
+    if processed_sales == "판매량 정보를 찾을 수 없습니다." and processed_rate == "달성률 정보를 찾을 수 없습니다." and ("Sold Out" in sales_raw_text or "Sold Out" in funded_raw_text):
+        processed_sales = "Sold Out"
+        processed_rate = "Sold Out"
+
+    return processed_sales, processed_rate
+
+async def extract_product_data(page, url):
+    """단일 제품 페이지에서 데이터를 추출하는 함수"""
+    print(f"URL: {url} 처리 시작...") # 디버그 로그 추가
+    try:
+        print(f"URL: {url} 페이지 로드 시도 중...") # 디버그 로그 추가
         # 페이지 로딩 전략 변경 및 명시적 대기 추가
-        page.goto(url, wait_until='load', timeout=60000)
-        page.wait_for_selector('[class*="ProductDetails__ProductTitle"]', timeout=30000)
+        await page.goto(url, wait_until='commit', timeout=30000) # 페이지 로딩 전략을 'commit'으로 변경 (최소 대기)
+        print(f"URL: {url} 페이지 로드 완료. 제품 타이틀 셀렉터 대기 중...") # 디버그 로그 추가
+        await page.wait_for_selector('[class*="ProductDetails__ProductTitle"]', timeout=30000)
+        # 페이지 로딩 후 2초 명시적 대기
+        await asyncio.sleep(2)
     except TimeoutError:
         print(f"페이지 로드 시간 초과: {url}")
         return None
 
     # --- 데이터 추출 ---
+    product_data = {
+        "제품_URL": url,
+        "진행_여부": "정보 없음",
+        "제품군": "정보 없음",
+        "제품명": "정보 없음",
+        "IP명": "정보 없음",
+        "IP_소개_링크": "정보 없음",
+        "제품_가격": "정보 없음",
+        "판매량": "정보 없음",
+        "달성률": "정보 없음",
+        "매출": 0.0,
+        "프로젝트_종료일": "정보 없음",
+        "배송_시작일": "정보 없음"
+    }
     
     # 제품명
     try:
-        product_name = page.locator('[class*="ProductDetails__ProductTitle"]').inner_text(timeout=3000)
+        product_name = await page.locator('[class*="ProductDetails__ProductTitle"]').inner_text(timeout=3000)
     except Exception as e:
-        product_name = f"제품명을 찾을 수 없습니다. 오류: {e}"
+        product_name = "제품명을 찾을 수 없습니다."
 
     # IP명
     try:
         # 'By:' 텍스트를 포함하는 링크를 찾아 IP 이름만 추출
         ip_name_element = page.locator('a:has-text("By:")')
-        ip_name_text = ip_name_element.inner_text(timeout=3000)
+        ip_name_text = await ip_name_element.inner_text(timeout=3000)
         ip_name = ip_name_text.replace('By: ', '').strip()
     except Exception as e:
-        ip_name = f"IP명을 찾을 수 없습니다. 오류: {e}"
+        ip_name = "IP명을 찾을 수 없습니다."
 
     # 제품군
     try:
         # 제품 헤더 안에서, /collections/ 또는 /shop/ URL을 포함하는 링크의 p 태그를 찾음
-        category = page.locator('[class*="ProductInfo__ProductHeaderWrapper"] a[href*="/shop/"] p, [class*="ProductInfo__ProductHeaderWrapper"] a[href*="/collections/"] p').first.inner_text(timeout=3000)
+        category = await page.locator('[class*="ProductInfo__ProductHeaderWrapper"] a[href*="/shop/"] p, [class*="ProductInfo__ProductHeaderWrapper"] a[href*="/collections/"] p').first.inner_text(timeout=3000)
     except Exception as e:
-        category = f"제품군을 찾을 수 없습니다. 오류: {e}"
+        category = "제품군을 찾을 수 없습니다."
 
     # 프로젝트 종료일
     try:
-        end_date_element = page.locator('[class*="ProductPageCountdown__CountdownDate"]')
-        if end_date_element.count() > 0:
-            end_date_text = end_date_element.inner_text(timeout=3000)
-            end_date = end_date_text.replace('Ends on ', '').strip()
-            status = "진행 중"
-        else:
-            # 종료된 캠페인을 위한 로직 (나중에 구체화)
-            end_date = "해당 없음"
-            status = "종료"
-    except Exception as e:
-        end_date = f"프로젝트 종료일을 찾을 수 없습니다. 오류: {e}"
-        status = f"상태 확인 중 오류: {e}"
-
-    # 판매량 (정확한 선택자 사용)
-    try:
-        # 사용자가 제공한 정확한 선택자 사용
-        sales_locator = page.locator('#__next > div._app__ContainerWrapper-meusgd-0.kPTMSg > div > div._app__ContentWrapper-meusgd-2.hIhdAc > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.bstoHm > div > div:nth-child(3) > div > div.ProgressBarContainer__ProgressRow-sc-1slgn8k-2.dYXbKV > p')
-        if sales_locator.count() > 0:
-            sales_volume = sales_locator.first.inner_text(timeout=3000)
-        else:
-            # 대체 선택자들
-            sales_locator_alt = page.locator(
-                'div.ProgressBarContainer__ProgressRow-sc-1slgn8k-2 p:has-text("sold"), '
-                '[class*="ProgressBarContainer"] p:has-text("sold"), '
-                'p:has-text("sold")'
-            )
-            sales_volume = sales_locator_alt.first.inner_text(timeout=3000)
-    except Exception as e:
-        sales_volume = f"판매량을 찾을 수 없습니다. 오류: {e}"
+        end_date = "해당 없음"
+        status = "종료"
         
-    # 달성률
-    try:
-        # '% funded' 텍스트를 포함하는 선택자
-        funded_rate = page.locator('p:has-text("% Funded")').inner_text(timeout=3000)
-    except Exception as e:
-        funded_rate = f"달성률을 찾을 수 없습니다. 오류: {e}"
-
-    # 배송 시작일
-    try:
-        shipping_date = page.locator('[class*="commonFunctions__ShipDateText"]').inner_text(timeout=3000)
-    except Exception as e:
-        shipping_date = f"배송 시작일을 찾을 수 없습니다. 오류: {e}"
-
-    # IP 소개 링크
-    try:
-        # 여러 링크가 있을 수 있으므로 첫 번째 링크를 선택
-        ip_link_elements = page.locator('[class*="CreatorMessage__CreatorMessageWrapper"] a')
-        if ip_link_elements.count() > 0:
-            ip_link = ip_link_elements.first.get_attribute('href', timeout=3000)
-            if ip_link and ip_link.startswith('/'):
-                ip_link = f"https://www.makeship.com{ip_link}"
+        # 1. 사용자가 제공한 정확한 선택자 시도
+        primary_end_date_locator = page.locator('#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div:nth-child(3) > div > p')
+        if await primary_end_date_locator.count() > 0:
+            end_date_text = await primary_end_date_locator.inner_text(timeout=3000)
+            if "ends on" in end_date_text.lower():
+                end_date = end_date_text.replace('Ends on ', '').strip()
+                status = "진행 중"
+            elif "ended:" in end_date_text.lower():
+                end_date = end_date_text.replace('Ended: ', '').strip()
+                status = "종료"
+            elif "days left" in end_date_text.lower():
+                end_date = "진행 중 (남은 일수 표시)"
+                status = "진행 중"
+            else:
+                end_date = end_date_text.strip()
+                if re.search(r'[A-Za-z]+\s+\d{1,2},\s+\d{4}', end_date):
+                    status = "진행 중"
+                else:
+                    status = "종료"
         else:
-            ip_link = "IP 소개 링크를 찾을 수 없습니다."
-    except Exception as e:
-        ip_link = f"IP 소개 링크를 찾을 수 없습니다. 오류: {e}"
+            status = "종료"
+        
+        # 2. 첫 번째 선택자가 실패했고, end_date가 아직 설정되지 않은 경우, 원래 사용하던 선택자 시도
+        #    (primary_end_date_locator가 아무것도 찾지 못했거나 오류 메시지를 반환한 경우)
+        if status == "종료" and end_date == "해당 없음": # 첫 번째 시도가 실패한 경우
+            fallback_end_date_locator = page.locator('[class*="ProductPageCountdown__CountdownDate"]')
+            if await fallback_end_date_locator.count() > 0:
+                end_date_text = await fallback_end_date_locator.inner_text(timeout=3000)
+                end_date = end_date_text.replace('Ends on ', '').strip()
+                status = "진행 중"
+            # 대체 선택자도 실패하면 최종적으로 "해당 없음" 유지
 
-    # 데이터 딕셔너리 생성
-    product_data = {
-        "제품_URL": url,
+    except Exception as e:
+        end_date = "프로젝트 종료일 정보를 찾을 수 없습니다."
+        status = "상태 확인 중 오류"
+
+    # 판매량 및 달성률
+    sales_volume_raw = "판매량 정보를 찾을 수 없습니다."
+    funded_rate_raw = "달성률 정보를 찾을 수 없습니다."
+    try:
+        # --- 판매량 및 달성률 추출 ---
+        try:
+            sales_text_found = ""
+            funded_text_found = ""
+
+            # 1. 판매량 특정 선택자들 시도
+            sales_locators = [
+                ("#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div:nth-child(3) > div > div.ProgressBarContainer__ProgressRow-sc-1slgn8k-2.cbQHDc > p", "판매량-ProgressRow"),
+                ("#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div:nth-child(3) > div > div.ProgressBarContainer__PastLimitedCampaignRow-sc-1slgn8k-3.bLtdCY > p", "판매량-PastLimitedCampaignRow"),
+                ('p[data-testid="units-sold-text"]', "Units Sold Text"),
+                (r'p:has-text("Sold Out")', "Sold Out Text")
+            ]
+            for selector, name in sales_locators:
+                try:
+                    text_element = page.locator(selector)
+                    if await text_element.count() > 0:
+                        current_text = await text_element.first.inner_text(timeout=1000) # 짧은 타임아웃
+                        if current_text and current_text.strip():
+                            sales_text_found = current_text.strip()
+                            print(f"DEBUG: '{name}' 로케이터로 판매량 찾음 -> '{sales_text_found}'")
+                            break
+                except Exception:
+                    pass
+
+            # 2. 달성률 특정 선택자들 시도
+            funded_locators = [
+                ("#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div:nth-child(3) > div > div.ProgressBarContainer__ProgressRow-sc-1slgn8k-2.cbQHDc > div > p", "달성률-ProgressRow-Funded"),
+                (r'p:has-text("% Funded")', "Funded Text"),
+                ("#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div:nth-child(3) > div > div.ProgressBarContainer__ProgressRow-sc-1slgn8k-2.cbQHDc > div > p", "추가된_달성률_선택자"),
+            ]
+            for selector, name in funded_locators:
+                try:
+                    text_element = page.locator(selector)
+                    if await text_element.count() > 0:
+                        current_text = await text_element.first.inner_text(timeout=1000) # 짧은 타임아웃
+                        if current_text and current_text.strip():
+                            funded_text_found = current_text.strip()
+                            print(f"DEBUG: '{name}' 로케이터로 달성률 찾음 -> '{funded_text_found}'")
+                            break
+                except Exception:
+                    pass
+
+            # 3. JavaScript 폴백: 두 정보 모두 찾지 못했을 경우 전체 페이지에서 텍스트 기반 패턴 검색
+            if not sales_text_found and not funded_text_found:
+                print("DEBUG: 특정 선택자들 실패. JavaScript 폴백 실행.")
+                find_visible_sales_text_js = """
+                () => {
+                    const patterns = [
+                        /\\d+\\s+of\\s+\\d+\\s+sold/i,
+                        /\\d+,?\\d*\\s+sold/i,
+                        /\\d+%\\s+Funded/i,
+                        /^Sold\\s+Out$/i
+                    ];
+                    const paragraphs = document.querySelectorAll('p');
+                    for (const p of paragraphs) {
+                        const isVisible = !!(p.offsetWidth || p.offsetHeight || p.getClientRects().length);
+                        if (isVisible) {
+                            for (const pattern of patterns) {
+                                if (pattern.test(p.innerText.trim())) {
+                                    return p.innerText.trim();
+                                }
+                            }
+                        }
+                    }
+                    return null;
+                }
+                """
+                js_combined_text = await page.evaluate(find_visible_sales_text_js)
+                if js_combined_text:
+                    if re.search(r'\d+% Funded', js_combined_text, re.IGNORECASE):
+                        funded_text_found = js_combined_text
+                    else:
+                        sales_text_found = js_combined_text
+                    print(f"DEBUG: JavaScript 폴백으로 텍스트 찾음 -> '{js_combined_text}'")
+
+            sales_volume_raw = sales_text_found if sales_text_found else "판매량 정보를 찾을 수 없습니다."
+            funded_rate_raw = funded_text_found if funded_text_found else "달성률 정보를 찾을 수 없습니다."
+
+            sales_volume, funded_rate = process_sales_data(sales_volume_raw, funded_rate_raw)
+            print(f"판매량: {sales_volume}")
+            print(f"달성률: {funded_rate}")
+            product_data["판매량"] = sales_volume  # 처리된 판매량 저장
+            product_data["달성률"] = funded_rate  # 처리된 달성률 저장
+
+        except Exception as e:
+            print(f"URL {page.url}에서 판매량/달성률 추출 실패: {e}")
+            product_data["판매량"] = "판매량 정보를 찾을 수 없습니다."
+            product_data["달성률"] = "달성률 정보를 찾을 수 없습니다."
+    except Exception as e:
+        print(f"[상위 try-except] URL {page.url}에서 판매량/달성률 추출 중 치명적인 오류 발생: {e}")
+        product_data["판매량"] = "판매량 정보를 찾을 수 없습니다."
+        product_data["달성률"] = "달성률 정보를 찾을 수 없습니다."
+        
+        # 배송 시작일
+        try:
+            shipping_date = "배송 시작일 정보를 찾을 수 없습니다."
+            
+            # 1. 사용자께서 존재한다고 말씀해주신 선택자 먼저 시도
+            primary_shipping_date_locator = page.locator('#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div.ProductInfo__PostPurchaseDetailsWrapper-sc-pdgh6r-9.jthCJt > div > div > p')
+            if await primary_shipping_date_locator.count() > 0:
+                shipping_date_text = await primary_shipping_date_locator.inner_text(timeout=3000)
+                shipping_date = shipping_date_text.replace('Ships ', '').strip()
+            
+            # 2. 첫 번째 선택자가 실패했을 경우 (아직 기본값인 경우), '초록색 선택자' 시도
+            if shipping_date == "배송 시작일 정보를 찾을 수 없습니다.":
+                fallback_shipping_date_locator = page.locator('#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div.commonFunctions__HybridMessagingContainer-sc-e97hvy-8.gpFhIO')
+                if await fallback_shipping_date_locator.count() > 0:
+                    shipping_date_text = await fallback_shipping_date_locator.inner_text(timeout=3000)
+                    shipping_date = shipping_date_text.replace('Ships ', '').strip()
+            
+        except Exception as e:
+            shipping_date = "배송 시작일 정보를 찾을 수 없습니다."
+
+        # IP 소개 링크
+        try:
+            # 여러 링크가 있을 수 있으므로 첫 번째 링크를 선택
+            ip_link_elements = page.locator('[class*="CreatorMessage__CreatorMessageWrapper"] a')
+            if await ip_link_elements.count() > 0:
+                ip_link = await ip_link_elements.first.get_attribute('href', timeout=3000)
+                if ip_link and ip_link.startswith('/'):
+                    ip_link = f"https://www.makeship.com{ip_link}"
+            else:
+                ip_link = "IP 소개 링크를 찾을 수 없습니다."
+        except Exception as e:
+            ip_link = "IP 소개 링크를 찾을 수 없습니다."
+
+        # 제품 가격
+        product_price = "가격을 찾을 수 없습니다."
+        try:
+            # 1. 기존의 primary_price_locator (nth-child(5) 버전) 시도
+            if product_price == "가격을 찾을 수 없습니다.":
+                old_primary_price_locator = page.locator('#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div:nth-child(5) > div > div > div > div.CompleteCollectionComponent__CompleteCollectionDetailRow-sc-pxn9vj-13.ffmDLt > div.CompleteCollectionComponent__TotalPriceWrapper-sc-pxn9vj-19.cDyXqm > div > p > font:nth-child(2) > font:nth-child(1)')
+                if await old_primary_price_locator.count() > 0:
+                    product_price = (await old_primary_price_locator.inner_text(timeout=3000)).replace('$', '').strip()
+                    
+                # 2. 사용자께서 요청하신 새로운 선택자 (`.ProductInfo__ProductHeaderWrapper... > div > p`) 시도
+                if product_price == "가격을 찾을 수 없습니다.":
+                    new_price_locator_2 = page.locator('#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div.ProductInfo__ProductHeaderWrapper-sc-pdgh6r-2.jUpShe > div > div > p')
+                    if await new_price_locator_2.count() > 0:
+                        product_price = (await new_price_locator_2.inner_text(timeout=3000)).replace('$', '').strip()
+
+                # 3. "Total Price:" 텍스트를 포함하는 요소 찾기
+                if product_price == "가격을 찾을 수 없습니다.":
+                    fallback_price_locator_text = page.locator(r'text=/Total Price: \$[0-9,.]+/i')
+                    if await fallback_price_locator_text.count() > 0:
+                        price_text = await fallback_price_locator_text.inner_text(timeout=3000)
+                        match = re.search(r'\$[0-9,.]+', price_text)
+                        if match:
+                            product_price = match.group(0).replace('$', '').strip()
+                            
+                # 4. 일반적인 가격 선택자 시도
+                if product_price == "가격을 찾을 수 없습니다.":
+                    general_price_locator = page.locator('[class*="ProductInfo__Price"]')
+                    if await general_price_locator.count() > 0:
+                        product_price = (await general_price_locator.inner_text(timeout=3000)).replace('$', '').strip()
+        except Exception as e:
+            product_price = "제품 가격 추출 실패: " + str(e)
+
+        # 매출 계산 (실제 크롤링한 가격 우선, 없으면 제품군별 하드코딩 가격 사용)
+        revenue = calculate_revenue(product_data["판매량"], category, product_price)
+
+        # 제품 가격을 찾지 못했을 경우, 제품군별 하드코딩 가격으로 대체
+        if product_price == "가격을 찾을 수 없습니다.":
+            estimated_price = get_category_price(category)
+            product_price = f"{estimated_price:.2f}" # 소수점 둘째 자리까지 표시
+            print(f"경고: 제품 가격을 찾을 수 없어 제품군 '{category}'의 추정 가격 ${product_price}로 대체했습니다.")
+
+    # 데이터 딕셔너리 생성 (초기화된 product_data 업데이트)
+    product_data.update({
         "진행_여부": status,
         "제품군": category,
         "제품명": product_name,
         "IP명": ip_name,
         "IP_소개_링크": ip_link,
-        "판매량": sales_volume,
-        "달성률": funded_rate,
+        "제품_가격": product_price,
+        "판매량": sales_volume_raw, 
+        "달성률": funded_rate_raw, 
+        "매출": revenue,
         "프로젝트_종료일": end_date,
         "배송_시작일": shipping_date
-    }
+    })
     
+    print(f"URL: {url} 데이터 추출 완료.") # 디버그 로그 추가
     return product_data
 
-def main():
-    # 처리할 URL 리스트 (여기에 URL들을 추가하세요)
-    urls = [
+def load_proxies_from_file(filename="proxy.txt"):
+    """프록시 목록 파일에서 프록시를 로드합니다."""
+    proxies = []
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and re.match(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+', line):
+                    proxies.append(line)
+        print(f"'{filename}'에서 {len(proxies)}개의 프록시를 로드했습니다.")
+    except FileNotFoundError:
+        print(f"오류: 프록시 파일 '{filename}'을 찾을 수 없습니다.")
+    except Exception as e:
+        print(f"프록시 파일 로드 중 오류 발생: {e}")
+    return proxies
 
-    "https://www.makeship.com/products/1-grit",
-    "https://www.makeship.com/products/1-grit-jumbo-plush-2-0",
-    "https://www.makeship.com/products/10th-anniversary-engineer-plush",
-    "https://www.makeship.com/products/13-colonies-ball-plushie",
-    "https://www.makeship.com/products/2-pixel-firefly-plush",
-    "https://www.makeship.com/products/2-pixel-firefly-plush-1",
-    "https://www.makeship.com/products/5am-pearl-2-0-plushie",
-    "https://www.makeship.com/products/5am-pearl-plush",
-    "https://www.makeship.com/products/a-date-with-death-5012-plushie",
-    "https://www.makeship.com/products/a-date-with-death-chibi-grim-reaper-hoodie",
-    "https://www.makeship.com/products/a-date-with-death-grim-reaper-hoodie",
-    "https://www.makeship.com/products/ace-dragon-2-0-longboi",
-    "https://www.makeship.com/products/ace-dragon-longboi",
-    "https://www.makeship.com/products/adora-plushie",
-    "https://www.makeship.com/products/aerbunny-plush",
-    "https://www.makeship.com/products/ai-mi-plushie",
-    "https://www.makeship.com/products/aika",
-    "https://www.makeship.com/products/airy-plushie",
-    "https://www.makeship.com/products/aj-alpaca-plushie",
-    "https://www.makeship.com/products/albino-styracosaurus-plushie",
-    "https://www.makeship.com/products/alchemist-plush",
-    "https://www.makeship.com/products/alex-kralie-plush",
-    "https://www.makeship.com/products/alex-the-honking-bird",
-    "https://www.makeship.com/products/amelia-scenty-plushie",
-    "https://www.makeship.com/products/amnesia-plushie",
-    "https://www.makeship.com/products/angel-dusty-plush",
-    "https://www.makeship.com/products/angry-baldi-plush",
-    "https://www.makeship.com/products/annie-plush",
-    "https://www.makeship.com/products/anny-gitd-plush",
-    "https://www.makeship.com/products/army-mart-plush",
-    "https://www.makeship.com/products/aro-dragon-longboi",
-    "https://www.makeship.com/products/art-fight-seafoam-vs-stardust-enamel-pins",
-    "https://www.makeship.com/products/arthur-plush",
-    "https://www.makeship.com/products/asmodeus-plush",
-    "https://www.makeship.com/products/australia-ball-plush",
-    "https://www.makeship.com/products/austria-hungary-ball",
-    "https://www.makeship.com/products/aviator-america",
-    "https://www.makeship.com/products/aviator-america-2-0-plush",
-    "https://www.makeship.com/products/awesome-vlog-plushie",
-    "https://www.makeship.com/products/axolotl-on-a-bucket-plush",
-    "https://www.makeship.com/products/azrael-a-date-with-death",
-    "https://www.makeship.com/products/baby-orphion-plush",
-    "https://www.makeship.com/products/bad-jumbo-plushie",
-    "https://www.makeship.com/products/ball-python-cuddle-noodle",
-    "https://www.makeship.com/products/barbarian-kobold-plush",
-    "https://www.makeship.com/products/barbatos-plushie",
-    "https://www.makeship.com/products/bard-goblin-plush",
-    "https://www.makeship.com/products/barn-lion",
-    "https://www.makeship.com/products/barnaby-jumbo-plush",
-    "https://www.makeship.com/products/barnaby-the-ghost-owl-gitd-plush",
-    "https://www.makeship.com/products/bartleby-jumbo-plush",
-    "https://www.makeship.com/products/bat-plush",
-    "https://www.makeship.com/products/batrick-the-bat-plush",
-    "https://www.makeship.com/products/bear-plush-1",
-    "https://www.makeship.com/products/bee-plush-1",
-    "https://www.makeship.com/products/beebo-plushie",
-    "https://www.makeship.com/products/beecat-plush",
-    "https://www.makeship.com/products/beelzebub-plushie",
-    "https://www.makeship.com/products/bella-plush",
-    "https://www.makeship.com/products/belphegor-plushie",
-    "https://www.makeship.com/products/benjamin-plush",
-    "https://www.makeship.com/products/benry",
-    "https://www.makeship.com/products/berd-gitd",
-    "https://www.makeship.com/products/bfb-jumbo-plush",
-    "https://www.makeship.com/products/bi-t-rex-plush",
-    "https://www.makeship.com/products/big-d-plushie",
-    "https://www.makeship.com/products/big-dog-plushie-1",
-    "https://www.makeship.com/products/bigfootjinx-plush",
-    "https://www.makeship.com/products/bingus-plush",
-    "https://www.makeship.com/products/birthday-c-a-k-e-emotional-support-demon-plushie",
-    "https://www.makeship.com/products/birthday-cake-emotional-support-demon-plushie",
-    "https://www.makeship.com/products/birthday-creature",
-    "https://www.makeship.com/products/bitsy-plushie",
-    "https://www.makeship.com/products/bive-plush",
-    "https://www.makeship.com/products/black-pawn",
-    "https://www.makeship.com/products/bleppy-plush",
-    "https://www.makeship.com/products/block-tales-tutorial-terry",
-    "https://www.makeship.com/products/blue-jeffling-keychain",
-    "https://www.makeship.com/products/bo-plush",
-    "https://www.makeship.com/products/bob-plush-3",
-    "https://www.makeship.com/products/bob-the-cat-plush",
-    "https://www.makeship.com/products/bobi-chiquito-martillador",
-    "https://www.makeship.com/products/bobicraft",
-    "https://www.makeship.com/products/bobicraft-gitd-wolf-2-0-plush",
-    "https://www.makeship.com/products/bobicraft-gitd-wolf-plush",
-    "https://www.makeship.com/products/bobicraft-jumbo-plush",
-    "https://www.makeship.com/products/bobicraft-vinyl-figure",
-    "https://www.makeship.com/products/bombi-plush",
-    "https://www.makeship.com/products/bon-glow-in-the-dark-plush",
-    "https://www.makeship.com/products/bon-the-bunny-plush",
-    "https://www.makeship.com/products/booker-plushie",
-    "https://www.makeship.com/products/boombox-man-vinyl-figure",
-    "https://www.makeship.com/products/boomerang-monkey-plush",
-    "https://www.makeship.com/products/boomrat-gitd-plush",
-    "https://www.makeship.com/products/boozoo-plush",
-    "https://www.makeship.com/products/boyfriend-plush",
-    "https://www.makeship.com/products/brad-armstrong-plush",
-    "https://www.makeship.com/products/brat-princess-plush",
-    "https://www.makeship.com/products/bridget-plush",
-    "https://www.makeship.com/products/british-empire-ball-plushie",
-    "https://www.makeship.com/products/british-red-coat",
-    "https://www.makeship.com/products/bronzeman-plush",
-    "https://www.makeship.com/products/bryce-soda-bottle-plushie",
-    "https://www.makeship.com/products/buck-ruffler-the-duck-shuffler-plush",
-    "https://www.makeship.com/products/buckshot-roulette-dealer-plushie",
-    "https://www.makeship.com/products/bucky-beaver-plush",
-    "https://www.makeship.com/products/buffpup-plush",
-    "https://www.makeship.com/products/bukvar-plush",
-    "https://www.makeship.com/products/bunlith-plush",
-    "https://www.makeship.com/products/burger-gil-gitd-plush",
-    "https://www.makeship.com/products/buttshroom-plush",
-    "https://www.makeship.com/products/camila-plush",
-    "https://www.makeship.com/products/canada-ball-plush",
-    "https://www.makeship.com/products/captainsauce-plush",
-    "https://www.makeship.com/products/carbot-infestor-plush",
-    "https://www.makeship.com/products/carbot-marine-cracked-visor",
-    "https://www.makeship.com/products/carbot-marine-patch",
-    "https://www.makeship.com/products/carbot-overlord-plush",
-    "https://www.makeship.com/products/carbot-pink-zergling-plush",
-    "https://www.makeship.com/products/carbot-zealot-plush",
-    "https://www.makeship.com/products/carbotzergling",
-    "https://www.makeship.com/products/carrot-ankylosaurus",
-    "https://www.makeship.com/products/cat-jard",
-    "https://www.makeship.com/products/cathy-plushie",
-    "https://www.makeship.com/products/catino-plush",
-    "https://www.makeship.com/products/centurii-chan-plush",
-    "https://www.makeship.com/products/cerby-plushie",
-    "https://www.makeship.com/products/ceres-fauna-plush",
-    "https://www.makeship.com/products/cesar-plush",
-    "https://www.makeship.com/products/change-god-keychain",
-    "https://www.makeship.com/products/chanterelle-mushling-plush",
-    "https://www.makeship.com/products/chaos-insurgency-plush",
-    "https://www.makeship.com/products/chapaa-plush",
-    "https://www.makeship.com/products/charles-plush",
-    "https://www.makeship.com/products/chef-catherine-plush",
-    "https://www.makeship.com/products/chicken-plush",
-    "https://www.makeship.com/products/chileworm-plush",
-    "https://www.makeship.com/products/chill-guy",
-    "https://www.makeship.com/products/china-ball-plush",
-    "https://www.makeship.com/products/choco-2-0-plush",
-    "https://www.makeship.com/products/choco-in-love-plush",
-    "https://www.makeship.com/products/chocola-plush",
-    "https://www.makeship.com/products/chromia-scott-plush",
-    "https://www.makeship.com/products/chuckles-plushie",
-    "https://www.makeship.com/products/chunky-runky",
-    "https://www.makeship.com/products/clay-the-claymore",
-    "https://www.makeship.com/products/cliccy-kitty",
-    "https://www.makeship.com/products/cliccy-kitty-2-0-plush",
-    "https://www.makeship.com/products/clyde-plush",
-    "https://www.makeship.com/products/clyde-the-killer-plushie",
-    "https://www.makeship.com/products/cocoa-plushie",
-    "https://www.makeship.com/products/coconut-plush",
-    "https://www.makeship.com/products/colisisial-zar1nator-plush",
-    "https://www.makeship.com/products/comandius-salchichas",
-    "https://www.makeship.com/products/corrupt-heart-gitd-plush",
-    "https://www.makeship.com/products/cove-holden-pins",
-    "https://www.makeship.com/products/cove-plush",
-    "https://www.makeship.com/products/cozy-winter-sweater",
-    "https://www.makeship.com/products/crumb-plush",
-    "https://www.makeship.com/products/cthulhu-plush",
-    "https://www.makeship.com/products/cthulu-mauler-plush",
-    "https://www.makeship.com/products/cubee-plush",
-    "https://www.makeship.com/products/cucarachoxi-plush",
-    "https://www.makeship.com/products/cultist-plushie",
-    "https://www.makeship.com/products/cupie-the-c-elegans",
-    "https://www.makeship.com/products/cursed-monkey-paw-plushie",
-    "https://www.makeship.com/products/cursed-voodoo-doll",
-    "https://www.makeship.com/products/cute-noob-plush",
-    "https://www.makeship.com/products/dancing-dragon-2-0-plushie",
-    "https://www.makeship.com/products/dancing-dragon-light-plushie",
-    "https://www.makeship.com/products/dancing-dragon-plush-plushie",
-    "https://www.makeship.com/products/dani-plush",
-    "https://www.makeship.com/products/darkk-mane",
-    "https://www.makeship.com/products/dart-monkey-2-0-plushie",
-    "https://www.makeship.com/products/dart-monkey-plush",
-    "https://www.makeship.com/products/dart-monkey-vinyl-figure",
-    "https://www.makeship.com/products/dawko",
-    "https://www.makeship.com/products/dawko-gitd",
-    "https://www.makeship.com/products/deadbeat-plush",
-    "https://www.makeship.com/products/deca-plush",
-    "https://www.makeship.com/products/deedee-plushie",
-    "https://www.makeship.com/products/deimos-plush",
-    "https://www.makeship.com/products/demon-beans",
-    "https://www.makeship.com/products/denmark-ball-plush",
-    "https://www.makeship.com/products/diavolo-plushie",
-    "https://www.makeship.com/products/diego-the-duelmaster-plush",
-    "https://www.makeship.com/products/dino-nuggie",
-    "https://www.makeship.com/products/dino-plush",
-    "https://www.makeship.com/products/dinot-keychain",
-    "https://www.makeship.com/products/dinozen-gecko-plushie",
-    "https://www.makeship.com/products/dj-subatomic-supernova-plush",
-    "https://www.makeship.com/products/doc-2bd",
-    "https://www.makeship.com/products/doctor-surlee-plushie",
-    "https://www.makeship.com/products/dogguy-plush",
-    "https://www.makeship.com/products/dom-the-honking-bird-plush",
-    "https://www.makeship.com/products/donu-plush",
-    "https://www.makeship.com/products/doobus-goobus-plushie",
-    "https://www.makeship.com/products/doodle-plush",
-    "https://www.makeship.com/products/doug-doug",
-    "https://www.makeship.com/products/dougdoug-gitd-plush",
-    "https://www.makeship.com/products/doughboi-dart-monkey",
-    "https://www.makeship.com/products/dozing-dozer",
-    "https://www.makeship.com/products/dr-mystery",
-    "https://www.makeship.com/products/dr-retro-doughboi",
-    "https://www.makeship.com/products/dragon-chainbody-plush",
-    "https://www.makeship.com/products/dragon-nuggie",
-    "https://www.makeship.com/products/dread-ducky",
-    "https://www.makeship.com/products/drop-plush",
-    "https://www.makeship.com/products/druid-plush",
-    "https://www.makeship.com/products/duckzilla-plush",
-    "https://www.makeship.com/products/duke-erisia-plushie",
-    "https://www.makeship.com/products/dumb-f",
-    "https://www.makeship.com/products/dumb-juice-frog-petition",
-    "https://www.makeship.com/products/duncan-plush",
-    "https://www.makeship.com/products/duskit-plush",
-    "https://www.makeship.com/products/dyawngrade-jumbo-plush",
-    "https://www.makeship.com/products/edamame-family-plush",
-    "https://www.makeship.com/products/edd-plush",
-    "https://www.makeship.com/products/eddie-plush",
-    "https://www.makeship.com/products/efap-halloween-hoodie",
-    "https://www.makeship.com/products/eggbug-plushie",
-    "https://www.makeship.com/products/eightfold",
-    "https://www.makeship.com/products/el-goblino-plush",
-    "https://www.makeship.com/products/elder-mimic-jumbo-gitd-plushie",
-    "https://www.makeship.com/products/elvarg-plush",
-    "https://www.makeship.com/products/emotional-support-demon-gitd-keychain",
-    "https://www.makeship.com/products/emotional-support-demon-gitd-plush",
-    "https://www.makeship.com/products/emotional-support-demon-keychain",
-    "https://www.makeship.com/products/emotional-support-demon-pins",
-    "https://www.makeship.com/products/emotional-support-demon-plush",
-    "https://www.makeship.com/products/endolotl-plush",
-    "https://www.makeship.com/products/engineering-beaver-plush",
-    "https://www.makeship.com/products/estonia-ball-plushie",
-    "https://www.makeship.com/products/eteled-plush-plush",
-    "https://www.makeship.com/products/european-union-jumbo-plush",
-    "https://www.makeship.com/products/evil-neuro-plush",
-    "https://www.makeship.com/products/excalibur",
-    "https://www.makeship.com/products/explosm-plush",
-    "https://www.makeship.com/products/fang-plushie",
-    "https://www.makeship.com/products/fantoccio-gitd-plushie",
-    "https://www.makeship.com/products/faust-plush",
-    "https://www.makeship.com/products/feet-lover-plushie",
-    "https://www.makeship.com/products/figure-plush",
-    "https://www.makeship.com/products/finii-plushie",
-    "https://www.makeship.com/products/finland-ball-plushie",
-    "https://www.makeship.com/products/fire-cat-plush",
-    "https://www.makeship.com/products/flamingo-berd",
-    "https://www.makeship.com/products/flipper",
-    "https://www.makeship.com/products/floppy-shoppy-hoodie",
-    "https://www.makeship.com/products/florida-man",
-    "https://www.makeship.com/products/flower-axolotl-plush",
-    "https://www.makeship.com/products/flower-frog-gitd-plush",
-    "https://www.makeship.com/products/fly-agaric-mushling-2-0",
-    "https://www.makeship.com/products/fly-agaric-mushling-plush",
-    "https://www.makeship.com/products/folly-plush-1",
-    "https://www.makeship.com/products/fork-barbarian-2-0-plush",
-    "https://www.makeship.com/products/fork-guy",
-    "https://www.makeship.com/products/fran-plush-1",
-    "https://www.makeship.com/products/france-ball-plush",
-    "https://www.makeship.com/products/frank-the-snake",
-    "https://www.makeship.com/products/frank-the-snake-longboi-2-0",
-    "https://www.makeship.com/products/frank-the-snake-longboi-2-1",
-    "https://www.makeship.com/products/friend-francis-plushie",
-    "https://www.makeship.com/products/fringy-plush",
-    "https://www.makeship.com/products/fringy-the-raven-plushie",
-    "https://www.makeship.com/products/fringy-vinyl-figure",
-    "https://www.makeship.com/products/frogge-plush",
-    "https://www.makeship.com/products/frost-plushie",
-    "https://www.makeship.com/products/fum-ko-the-good-plushie-2",
-    "https://www.makeship.com/products/fwench-fwy-they-them-plushie",
-    "https://www.makeship.com/products/g-o-a-t",
-    "https://www.makeship.com/products/gabriel-plush",
-    "https://www.makeship.com/products/gabriel-vinyl-figure",
-    "https://www.makeship.com/products/gamma-plush",
-    "https://www.makeship.com/products/gardener-plush",
-    "https://www.makeship.com/products/gawr-gura-plush",
-    "https://www.makeship.com/products/gd-colon-plush",
-    "https://www.makeship.com/products/geoffrey-sugarloaf-plush",
-    "https://www.makeship.com/products/geraldo-plush",
-    "https://www.makeship.com/products/german-ball-plush",
-    "https://www.makeship.com/products/german-empire-plush",
-    "https://www.makeship.com/products/ghost-mango-plushie",
-    "https://www.makeship.com/products/gideon-plushie",
-    "https://www.makeship.com/products/gigachad-plush",
-    "https://www.makeship.com/products/giggle-plushie",
-    "https://www.makeship.com/products/giovanni",
-    "https://www.makeship.com/products/giovanni-potage-vinyl-figurine",
-    "https://www.makeship.com/products/girl-dm-plush",
-    "https://www.makeship.com/products/girlfriend-plush",
-    "https://www.makeship.com/products/glamrock-dawko-plush",
-    "https://www.makeship.com/products/glomi-plush",
-    "https://www.makeship.com/products/gloombat-plushie",
-    "https://www.makeship.com/products/glow-t-plushie",
-    "https://www.makeship.com/products/gnome-child-plush",
-    "https://www.makeship.com/products/goatling-butler-plush",
-    "https://www.makeship.com/products/gobbler-king-jumbo-plush",
-    "https://www.makeship.com/products/goblin-2-0-plush",
-    "https://www.makeship.com/products/goblin-gitd",
-    "https://www.makeship.com/products/goblin-vinyl-figure",
-    "https://www.makeship.com/products/godot-robot-plush",
-    "https://www.makeship.com/products/gold-trimmed-rune-champion-plush",
-    "https://www.makeship.com/products/good-boy-tato-plushie",
-    "https://www.makeship.com/products/gorilla-tag-monke",
-    "https://www.makeship.com/products/goth-plush-1",
-    "https://www.makeship.com/products/gracello-plush",
-    "https://www.makeship.com/products/gracie-plushie",
-    "https://www.makeship.com/products/graham-ness-payser-the-pacesetter-plushie",
-    "https://www.makeship.com/products/grandmother-raven-plush",
-    "https://www.makeship.com/products/greece-ball-plush",
-    "https://www.makeship.com/products/gricko-plushie",
-    "https://www.makeship.com/products/grim-reaper-plush",
-    "https://www.makeship.com/products/grumble-jumbo",
-    "https://www.makeship.com/products/grumley-plushie",
-    "https://www.makeship.com/products/grumpy-onetopic-plush",
-    "https://www.makeship.com/products/grunt-from-amnesia-plush",
-    "https://www.makeship.com/products/guardian-cat-gitd-plush",
-    "https://www.makeship.com/products/gwendolin-plush",
-    "https://www.makeship.com/products/hakos-baelz-plush",
-    "https://www.makeship.com/products/hallowed-armor-plush",
-    "https://www.makeship.com/products/hank-plush",
-    "https://www.makeship.com/products/hank-wimbleton-plush",
-    "https://www.makeship.com/products/happy-chaos-plush",
-    "https://www.makeship.com/products/happy-haunting-wally-darling-plushie",
-    "https://www.makeship.com/products/hatsune-miku-plush",
-    "https://www.makeship.com/products/hazel-plushie",
-    "https://www.makeship.com/products/heavyblade-rabbit-plushie",
-    "https://www.makeship.com/products/henry-and-baloo-plush",
-    "https://www.makeship.com/products/henyathegenius-plush",
-    "https://www.makeship.com/products/holy-roman-empire-plush",
-    "https://www.makeship.com/products/honey-goblin-plush",
-    "https://www.makeship.com/products/hoodie-plush",
-    "https://www.makeship.com/products/hoody-2-0-plush",
-    "https://www.makeship.com/products/hootsie-plush-petition",
-    "https://www.makeship.com/products/hopper-plush",
-    "https://www.makeship.com/products/hopper-plush-1",
-    "https://www.makeship.com/products/hotdog-man-az-plush",
-    "https://www.makeship.com/products/hubert-plush",
-    "https://www.makeship.com/products/human1-keychain",
-    "https://www.makeship.com/products/i-cant-solo-her-plush",
-    "https://www.makeship.com/products/iilluminaughtii-2-0-plush",
-    "https://www.makeship.com/products/iilluminaughtii-plush",
-    "https://www.makeship.com/products/iilluminaughtii-plush-2",
-    "https://www.makeship.com/products/imperial-germany-ball",
-    "https://www.makeship.com/products/impulsesv-2-0-plushie",
-    "https://www.makeship.com/products/india-ball-plush",
-    "https://www.makeship.com/products/inky-cap-mushling-plush",
-    "https://www.makeship.com/products/inspekta-plushie",
-    "https://www.makeship.com/products/insym-plushie",
-    "https://www.makeship.com/products/ireland-ball-plush",
-    "https://www.makeship.com/products/ireland-plushie",
-    "https://www.makeship.com/products/ironmouse-plush",
-    "https://www.makeship.com/products/isabeau",
-    "https://www.makeship.com/products/italy-ball-plush",
-    "https://www.makeship.com/products/jacob-plush",
-    "https://www.makeship.com/products/japan-ball-plush",
-    "https://www.makeship.com/products/jawbone-sharkhound-plush",
-    "https://www.makeship.com/products/jay-plush",
-    "https://www.makeship.com/products/jay-plushie",
-    "https://www.makeship.com/products/jean-plushie",
-    "https://www.makeship.com/products/jebidiah-christoff-plushie",
-    "https://www.makeship.com/products/jeff-plush",
-    "https://www.makeship.com/products/jeff-the-killer",
-    "https://www.makeship.com/products/jeff-the-killer-2-0-plush",
-    "https://www.makeship.com/products/jellie",
-    "https://www.makeship.com/products/jesterbean-plushie",
-    "https://www.makeship.com/products/jimbo-plushie",
-    "https://www.makeship.com/products/jocat-goblin-plushie",
-    "https://www.makeship.com/products/jock-plush",
-    "https://www.makeship.com/products/john-egbert-plushie",
-    "https://www.makeship.com/products/joobie-plush",
-    "https://www.makeship.com/products/juan-plush",
-    "https://www.makeship.com/products/jumbo-eyefestation-plush",
-    "https://www.makeship.com/products/juno-birch",
-    "https://www.makeship.com/products/juno-plush",
-    "https://www.makeship.com/products/kabbu-plush",
-    "https://www.makeship.com/products/kagamine-len-plushie",
-    "https://www.makeship.com/products/kagamine-rin-plushie",
-    "https://www.makeship.com/products/kaif",
-    "https://www.makeship.com/products/kaiser-platypus",
-    "https://www.makeship.com/products/kappa-plush",
-    "https://www.makeship.com/products/karkat-vantas-plushie",
-    "https://www.makeship.com/products/kazakhstan-brick-plush",
-    "https://www.makeship.com/products/keesh-longboi",
-    "https://www.makeship.com/products/keeshee-jumbo-plush",
-    "https://www.makeship.com/products/keralis",
-    "https://www.makeship.com/products/kevin-plush",
-    "https://www.makeship.com/products/kevin-plush-1",
-    "https://www.makeship.com/products/kevin-the-goblin-plush",
-    "https://www.makeship.com/products/keyush-keychain",
-    "https://www.makeship.com/products/kid-vampire-plushie",
-    "https://www.makeship.com/products/killerbean",
-    "https://www.makeship.com/products/king-black-dragon-jumbo-plush",
-    "https://www.makeship.com/products/kingdom-of-france-plushie",
-    "https://www.makeship.com/products/kitsune-japan-ball-plushie",
-    "https://www.makeship.com/products/kobold-goblin-plush",
-    "https://www.makeship.com/products/koga-plush",
-    "https://www.makeship.com/products/koko-the-adventurer-plush",
-    "https://www.makeship.com/products/korea-ball-plushie",
-    "https://www.makeship.com/products/kremy-plushie",
-    "https://www.makeship.com/products/kuro-plush",
-    "https://www.makeship.com/products/lacey-plushie",
-    "https://www.makeship.com/products/lady-bella-plush",
-    "https://www.makeship.com/products/lady-lucerne-plushie",
-    "https://www.makeship.com/products/larry-the-cat-plushie",
-    "https://www.makeship.com/products/latte-plush",
-    "https://www.makeship.com/products/lea-plush",
-    "https://www.makeship.com/products/leif-plush",
-    "https://www.makeship.com/products/lemon-plushie",
-    "https://www.makeship.com/products/leper-plush",
-    "https://www.makeship.com/products/lets-go-gambling-plushie",
-    "https://www.makeship.com/products/leviathan-plush",
-    "https://www.makeship.com/products/liam-backpack-plushie",
-    "https://www.makeship.com/products/lil-bam-plushie",
-    "https://www.makeship.com/products/lil-fil-plush",
-    "https://www.makeship.com/products/lil-gargy",
-    "https://www.makeship.com/products/lil-mads-plush",
-    "https://www.makeship.com/products/lil-pootis-2-0-plush",
-    "https://www.makeship.com/products/lil-pootis-2-0-plushie",
-    "https://www.makeship.com/products/lil-pootis-plush",
-    "https://www.makeship.com/products/lili-plush",
-    "https://www.makeship.com/products/limey",
-    "https://www.makeship.com/products/little-manly-plush",
-    "https://www.makeship.com/products/little-misfortune-plush",
-    "https://www.makeship.com/products/little-wizard-frog-plush",
-    "https://www.makeship.com/products/lixian-plush",
-    "https://www.makeship.com/products/lneta-plush",
-    "https://www.makeship.com/products/loop-plushie",
-    "https://www.makeship.com/products/lord-lowden-clear-plushie",
-    "https://www.makeship.com/products/lord-ralph-plush",
-    "https://www.makeship.com/products/lots-of-loaf",
-    "https://www.makeship.com/products/loulou-ducky-2-0-plushie",
-    "https://www.makeship.com/products/loulou-ducky-plush",
-    "https://www.makeship.com/products/lovebirb-plush",
-    "https://www.makeship.com/products/lucifer-plush",
-    "https://www.makeship.com/products/lucky-2-0-plushie",
-    "https://www.makeship.com/products/lucky-plush",
-    "https://www.makeship.com/products/lythero-plush",
-    "https://www.makeship.com/products/mafioso-turnip-boy",
-    "https://www.makeship.com/products/maggot-plushie",
-    "https://www.makeship.com/products/malistaire-vinyl-figure",
-    "https://www.makeship.com/products/malori-plush",
-    "https://www.makeship.com/products/mammon-plush",
-    "https://www.makeship.com/products/mango-2-0-plush",
-    "https://www.makeship.com/products/mango-keychain",
-    "https://www.makeship.com/products/mango-plush",
-    "https://www.makeship.com/products/maple-deer-plushie",
-    "https://www.makeship.com/products/maple-plush-1",
-    "https://www.makeship.com/products/mariyam-plush",
-    "https://www.makeship.com/products/mark-plush",
-    "https://www.makeship.com/products/marketable-rin-penrose-plushie",
-    "https://www.makeship.com/products/martin-plush",
-    "https://www.makeship.com/products/masky-2-0-plush",
-    "https://www.makeship.com/products/masky-plush",
-    "https://www.makeship.com/products/matt-plush",
-    "https://www.makeship.com/products/mauler-2-0-plush",
-    "https://www.makeship.com/products/mauler-plush",
-    "https://www.makeship.com/products/mauler-the-longpire-plushie",
-    "https://www.makeship.com/products/mauler-vinyl-figure",
-    "https://www.makeship.com/products/may-plush",
-    "https://www.makeship.com/products/meat-boy-plush",
-    "https://www.makeship.com/products/meatsnake-glow-in-the-dark-longboi",
-    "https://www.makeship.com/products/megurine-luka-plush",
-    "https://www.makeship.com/products/merle-ambrose-vinyl-figure",
-    "https://www.makeship.com/products/mexico-ball-plush",
-    "https://www.makeship.com/products/milk-chan-plush",
-    "https://www.makeship.com/products/mimi-plush-1",
-    "https://www.makeship.com/products/mimic-plushie",
-    "https://www.makeship.com/products/mini-maji-dragon-plushie",
-    "https://www.makeship.com/products/miniberd",
-    "https://www.makeship.com/products/mirabelle",
-    "https://www.makeship.com/products/miss-coco-peru-plush",
-    "https://www.makeship.com/products/moab-and-tack-shooter-pin-pack",
-    "https://www.makeship.com/products/moab-jumbo-2-0-plushie",
-    "https://www.makeship.com/products/moab-plush",
-    "https://www.makeship.com/products/molly",
-    "https://www.makeship.com/products/molly-gitd-plush",
-    "https://www.makeship.com/products/mongolian-empire-jumbo-plush",
-    "https://www.makeship.com/products/monke-doughboi",
-    "https://www.makeship.com/products/monke-keychain",
-    "https://www.makeship.com/products/monsieur-le-flouf",
-    "https://www.makeship.com/products/mori-calliope-plush",
-    "https://www.makeship.com/products/mouth-the-chipmunk",
-    "https://www.makeship.com/products/mr-bigglesworths-memorial-plushie",
-    "https://www.makeship.com/products/mr-p-plushie",
-    "https://www.makeship.com/products/mr-plant-plush",
-    "https://www.makeship.com/products/mr-satan-plush",
-    "https://www.makeship.com/products/mrmeola-plush",
-    "https://www.makeship.com/products/mrnightmare-plush",
-    "https://www.makeship.com/products/muffin-plush",
-    "https://www.makeship.com/products/murder-monkey-plush",
-    "https://www.makeship.com/products/my-beeautiful-friend-plush",
-    "https://www.makeship.com/products/my-singing-monsters-buzzinga-plush",
-    "https://www.makeship.com/products/my-singing-monsters-wubbox-plushie",
-    "https://www.makeship.com/products/mylo-plush",
-    "https://www.makeship.com/products/mysticlight-plushie",
-    "https://www.makeship.com/products/mystique-plush",
-    "https://www.makeship.com/products/nanashi-mumei-plush",
-    "https://www.makeship.com/products/neow-plush",
-    "https://www.makeship.com/products/nepal-plush",
-    "https://www.makeship.com/products/nerd-plush",
-    "https://www.makeship.com/products/netherlands-ball-plushie",
-    "https://www.makeship.com/products/neuro-sama-2-0-plushie",
-    "https://www.makeship.com/products/neuro-sama-plush",
-    "https://www.makeship.com/products/nibbles-the-obt-plushie",
-    "https://www.makeship.com/products/nieve-plush",
-    "https://www.makeship.com/products/night-guard",
-    "https://www.makeship.com/products/night-light-mushling-plush",
-    "https://www.makeship.com/products/ninja-monkey-plush",
-    "https://www.makeship.com/products/ninja-pig-plush",
-    "https://www.makeship.com/products/ninjaxx-plush",
-    "https://www.makeship.com/products/ninomae-ina-nis-plush",
-    "https://www.makeship.com/products/noah-spirit-plush",
-    "https://www.makeship.com/products/noobe-plushie",
-    "https://www.makeship.com/products/north-korea-ball-gitd-plush",
-    "https://www.makeship.com/products/norway-ball-plush",
-    "https://www.makeship.com/products/nothing",
-    "https://www.makeship.com/products/novice-gear-hoodie",
-    "https://www.makeship.com/products/nyanners-plush",
-    "https://www.makeship.com/products/obyn-greenfoot-plush",
-    "https://www.makeship.com/products/okapi-plush",
-    "https://www.makeship.com/products/older-neptune-plushie",
-    "https://www.makeship.com/products/oliver-swift-plush",
-    "https://www.makeship.com/products/oniberri-plush",
-    "https://www.makeship.com/products/operator-gitd-plush",
-    "https://www.makeship.com/products/orca-pup",
-    "https://www.makeship.com/products/ordo-mediare-sister",
-    "https://www.makeship.com/products/ouro-kronii-plush",
-    "https://www.makeship.com/products/owoster",
-    "https://www.makeship.com/products/oz-media",
-    "https://www.makeship.com/products/painter-plush",
-    "https://www.makeship.com/products/pancake-2-0-plush",
-    "https://www.makeship.com/products/pancake-in-love-plush",
-    "https://www.makeship.com/products/pank2go-scarf-keychain",
-    "https://www.makeship.com/products/pat-jumbo-plush",
-    "https://www.makeship.com/products/peanut-plush-1",
-    "https://www.makeship.com/products/pearl-plush",
-    "https://www.makeship.com/products/peggy-plushie",
-    "https://www.makeship.com/products/penny-bun-plush",
-    "https://www.makeship.com/products/pepper-dog-of-wisdom",
-    "https://www.makeship.com/products/pet-foolery",
-    "https://www.makeship.com/products/petfoolery-brutus",
-    "https://www.makeship.com/products/phenicfox-plushie",
-    "https://www.makeship.com/products/phi-plush",
-    "https://www.makeship.com/products/philbert",
-    "https://www.makeship.com/products/philbert-tommy",
-    "https://www.makeship.com/products/phonegingi-plush",
-    "https://www.makeship.com/products/piggle-plush",
-    "https://www.makeship.com/products/pillowdear-plushie",
-    "https://www.makeship.com/products/pipe-bomb-plush",
-    "https://www.makeship.com/products/pipefox-longboi",
-    "https://www.makeship.com/products/pippi-2-0-plushie",
-    "https://www.makeship.com/products/pippi-plush",
-    "https://www.makeship.com/products/pixel-plush",
-    "https://www.makeship.com/products/pixie-plush",
-    "https://www.makeship.com/products/plague-doctor-plush",
-    "https://www.makeship.com/products/platypus-capitalist-plushie",
-    "https://www.makeship.com/products/platypus-conquistador-plushie",
-    "https://www.makeship.com/products/platypus-musketeer-plushie",
-    "https://www.makeship.com/products/platypus-samurai",
-    "https://www.makeship.com/products/pluto-living",
-    "https://www.makeship.com/products/pluto-plush",
-    "https://www.makeship.com/products/poku-plushie",
-    "https://www.makeship.com/products/poland-ball",
-    "https://www.makeship.com/products/poland-lithuania-ball-plush",
-    "https://www.makeship.com/products/possum",
-    "https://www.makeship.com/products/potemkin-plush",
-    "https://www.makeship.com/products/preacher-plush",
-    "https://www.makeship.com/products/prep-plush",
-    "https://www.makeship.com/products/pretty-dino-rave-girl-gitd-plush",
-    "https://www.makeship.com/products/pretty-ollie-plush",
-    "https://www.makeship.com/products/pride-duncan-plush",
-    "https://www.makeship.com/products/pride-kiwi-plush",
-    "https://www.makeship.com/products/projekt-melody-plush",
-    "https://www.makeship.com/products/protag-plush",
-    "https://www.makeship.com/products/prussia-plushie",
-    "https://www.makeship.com/products/psychopomp-plushie",
-    "https://www.makeship.com/products/pud-the-pride-dino-plush",
-    "https://www.makeship.com/products/pufferbunny",
-    "https://www.makeship.com/products/pumpkin-emotional-support-demon-plushie",
-    "https://www.makeship.com/products/pumpkin-plush",
-    "https://www.makeship.com/products/pumpkin-rabbit",
-    "https://www.makeship.com/products/puss-plush",
-    "https://www.makeship.com/products/queer-chameleon-plushie",
-    "https://www.makeship.com/products/quest-sprout-2-0-plush",
-    "https://www.makeship.com/products/quest-sprout-vinyl-figure",
-    "https://www.makeship.com/products/quincy-plush",
-    "https://www.makeship.com/products/quincystavern-plush",
-    "https://www.makeship.com/products/rags-2-0-plush",
-    "https://www.makeship.com/products/rags-o-lantern-plushie",
-    "https://www.makeship.com/products/rags-plush",
-    "https://www.makeship.com/products/rags-vinyl-figure",
-    "https://www.makeship.com/products/rainbow-ankylosaurus",
-    "https://www.makeship.com/products/rainbow-emotional-support-demon",
-    "https://www.makeship.com/products/rainbow-horns-emotional-support-demon-plush",
-    "https://www.makeship.com/products/rainbow-mango-plush",
-    "https://www.makeship.com/products/rainbow-t-rex",
-    "https://www.makeship.com/products/ralph-plush",
-    "https://www.makeship.com/products/rambley-the-raccoon-plush",
-    "https://www.makeship.com/products/ramlethal-valentine-plush",
-    "https://www.makeship.com/products/ramsey-plush",
-    "https://www.makeship.com/products/randy-jade-2-0-plush",
-    "https://www.makeship.com/products/randy-jade-gitd-plush",
-    "https://www.makeship.com/products/randy-plush",
-    "https://www.makeship.com/products/reaper-dog-gitd-plush",
-    "https://www.makeship.com/products/red-jeffling-keychain",
-    "https://www.makeship.com/products/red-regrow-cammo-fortified-bloon-plush",
-    "https://www.makeship.com/products/retrospecter-plush",
-    "https://www.makeship.com/products/rev-plush",
-    "https://www.makeship.com/products/riggy-plush",
-    "https://www.makeship.com/products/rob-plush",
-    "https://www.makeship.com/products/rody-dead-plate-plushie",
-    "https://www.makeship.com/products/rogue-goblin-plush",
-    "https://www.makeship.com/products/roman-empire-plush",
-    "https://www.makeship.com/products/roman-empire-plush-1",
-    "https://www.makeship.com/products/romania-ball-plushie",
-    "https://www.makeship.com/products/rosyclozy",
-    "https://www.makeship.com/products/roxicake-plushie",
-    "https://www.makeship.com/products/royal-cat-accessory-pack",
-    "https://www.makeship.com/products/russian-ball-plush",
-    "https://www.makeship.com/products/ruv-plush",
-    "https://www.makeship.com/products/sad-bunlith-plush",
-    "https://www.makeship.com/products/sad-ghost-plush",
-    "https://www.makeship.com/products/sad-nuggie-plush",
-    "https://www.makeship.com/products/safety-mole-plush",
-    "https://www.makeship.com/products/saichania-plush",
-    "https://www.makeship.com/products/salamander-longboi-plush",
-    "https://www.makeship.com/products/salem-plush",
-    "https://www.makeship.com/products/sancha-gobzales-plushie",
-    "https://www.makeship.com/products/sanford-plush",
-    "https://www.makeship.com/products/sarcosuchus-bi-pride-plushie",
-    "https://www.makeship.com/products/saruei-plush",
-    "https://www.makeship.com/products/sarvente-plush",
-    "https://www.makeship.com/products/sashley-plush",
-    "https://www.makeship.com/products/satan-plush",
-    "https://www.makeship.com/products/sauda-plush",
-    "https://www.makeship.com/products/saurium-plushie",
-    "https://www.makeship.com/products/sayu-plush",
-    "https://www.makeship.com/products/scotch",
-    "https://www.makeship.com/products/scotland-ball-plushie",
-    "https://www.makeship.com/products/scp-173",
-    "https://www.makeship.com/products/scratch-plush",
-    "https://www.makeship.com/products/screech-plushie",
-    "https://www.makeship.com/products/sebastian-keychain",
-    "https://www.makeship.com/products/seek-plush",
-    "https://www.makeship.com/products/sera-plush",
-    "https://www.makeship.com/products/sergeant-coyle-plushie",
-    "https://www.makeship.com/products/settled-plush",
-    "https://www.makeship.com/products/sgt-norm-allen-plush",
-    "https://www.makeship.com/products/sha-plush",
-    "https://www.makeship.com/products/shade-plush",
-    "https://www.makeship.com/products/shaggy-inky-cap-plush",
-    "https://www.makeship.com/products/shah-platypus-plushie",
-    "https://www.makeship.com/products/shambler-plushie-limited",
-    "https://www.makeship.com/products/sharko-plush",
-    "https://www.makeship.com/products/sharlotta-plush",
-    "https://www.makeship.com/products/sheriff-plushie",
-    "https://www.makeship.com/products/showtime-dawko-voice-box-plush",
-    "https://www.makeship.com/products/shrimpy-plush-red-version",
-    "https://www.makeship.com/products/siffrin-2-0-plush",
-    "https://www.makeship.com/products/silver-fox-plush",
-    "https://www.makeship.com/products/silvervale-plush",
-    "https://www.makeship.com/products/simon-from-soma-plush",
-    "https://www.makeship.com/products/sir-becket-plush",
-    "https://www.makeship.com/products/siren-head",
-    "https://www.makeship.com/products/siren-plush",
-    "https://www.makeship.com/products/skizzleman-plushie",
-    "https://www.makeship.com/products/skye-plush",
-    "https://www.makeship.com/products/slippy-plush",
-    "https://www.makeship.com/products/slow-tiger",
-    "https://www.makeship.com/products/smokeebee-gitd-plush",
-    "https://www.makeship.com/products/smokeebee-plush",
-    "https://www.makeship.com/products/smol-zen-gitd-plush",
-    "https://www.makeship.com/products/sniper-monkey-plush",
-    "https://www.makeship.com/products/solomon-plushie",
-    "https://www.makeship.com/products/soma-hoodie",
-    "https://www.makeship.com/products/soviet",
-    "https://www.makeship.com/products/soviet-2-0-plush",
-    "https://www.makeship.com/products/soviet-ball",
-    "https://www.makeship.com/products/space-engineers-plush",
-    "https://www.makeship.com/products/spain-ball-plush",
-    "https://www.makeship.com/products/speckle-memory-merge-plush",
-    "https://www.makeship.com/products/spiffo-2-0-plushie",
-    "https://www.makeship.com/products/spiffo-plush",
-    "https://www.makeship.com/products/spirit-cat-gitd",
-    "https://www.makeship.com/products/spleens",
-    "https://www.makeship.com/products/split-plush",
-    "https://www.makeship.com/products/sploot",
-    "https://www.makeship.com/products/squiddy-plush",
-    "https://www.makeship.com/products/steadfast-spiffo-plush",
-    "https://www.makeship.com/products/stegosaurus",
-    "https://www.makeship.com/products/sun-kenji",
-    "https://www.makeship.com/products/sun-kenji-2-0-plushie",
-    "https://www.makeship.com/products/super-fox-2-0",
-    "https://www.makeship.com/products/super-fox-plush",
-    "https://www.makeship.com/products/super-monkey-plush",
-    "https://www.makeship.com/products/super-skullcat-plush",
-    "https://www.makeship.com/products/supurrvisor-plush",
-    "https://www.makeship.com/products/sweden-ball-plush",
-    "https://www.makeship.com/products/switzerland-ball-plushie",
-    "https://www.makeship.com/products/swordscomic-plush",
-    "https://www.makeship.com/products/sybil-plush",
-    "https://www.makeship.com/products/sybil-plush-2-0",
-    "https://www.makeship.com/products/tagged-monke-plushie",
-    "https://www.makeship.com/products/takanashi-kiara-plush",
-    "https://www.makeship.com/products/tamari-gitd-plush",
-    "https://www.makeship.com/products/tamari-plush",
-    "https://www.makeship.com/products/tangotek-plush",
-    "https://www.makeship.com/products/tapi-gitd-jumbo-plush",
-    "https://www.makeship.com/products/tapi-plush",
-    "https://www.makeship.com/products/tassha-plush",
-    "https://www.makeship.com/products/tater-tot-plushie",
-    "https://www.makeship.com/products/ten-hundred-plush",
-    "https://www.makeship.com/products/terrifying-harpy-dragon-plush",
-    "https://www.makeship.com/products/terry-the-octoskull",
-    "https://www.makeship.com/products/tetra-plush",
-    "https://www.makeship.com/products/texas-ball-plushie",
-    "https://www.makeship.com/products/the-augusttheduck-plush",
-    "https://www.makeship.com/products/the-bard-plush",
-    "https://www.makeship.com/products/the-beast-plushie",
-    "https://www.makeship.com/products/the-broker",
-    "https://www.makeship.com/products/the-critical-doggo-plush",
-    "https://www.makeship.com/products/the-critical-drinker-plush",
-    "https://www.makeship.com/products/the-cutest-lamb-in-the-world-plush",
-    "https://www.makeship.com/products/the-dancing-banana-plush",
-    "https://www.makeship.com/products/the-duck-plushie-1",
-    "https://www.makeship.com/products/the-flyknight",
-    "https://www.makeship.com/products/the-guy",
-    "https://www.makeship.com/products/the-guy-plush",
-    "https://www.makeship.com/products/the-guy-plushie-2-0",
-    "https://www.makeship.com/products/the-guys-horse",
-    "https://www.makeship.com/products/the-intruder-plush",
-    "https://www.makeship.com/products/the-man-in-the-suit-plushie",
-    "https://www.makeship.com/products/the-operator-vinyl-figure",
-    "https://www.makeship.com/products/the-sheriff",
-    "https://www.makeship.com/products/the-witch-plush",
-    "https://www.makeship.com/products/thresher-longboi",
-    "https://www.makeship.com/products/thrumbo-plush",
-    "https://www.makeship.com/products/thunder-snake-longboi",
-    "https://www.makeship.com/products/tigor-tonk-plush",
-    "https://www.makeship.com/products/tim-plushie",
-    "https://www.makeship.com/products/time-eater-plush",
-    "https://www.makeship.com/products/timmy-buoy",
-    "https://www.makeship.com/products/tiny-snek-plush",
-    "https://www.makeship.com/products/tobias-fate",
-    "https://www.makeship.com/products/tom-plush",
-    "https://www.makeship.com/products/torbek-plushie",
-    "https://www.makeship.com/products/tord-plushie",
-    "https://www.makeship.com/products/tortoise-plush",
-    "https://www.makeship.com/products/trans-pride-dragon-longboi",
-    "https://www.makeship.com/products/treyten",
-    "https://www.makeship.com/products/tricky-the-clown-plush",
-    "https://www.makeship.com/products/trimming-plush",
-    "https://www.makeship.com/products/tringapore-plush",
-    "https://www.makeship.com/products/truffletoot",
-    "https://www.makeship.com/products/turkey-ball-plush",
-    "https://www.makeship.com/products/turnip-boy-2-0",
-    "https://www.makeship.com/products/turnip-boy-plush",
-    "https://www.makeship.com/products/turnip-boy-v2",
-    "https://www.makeship.com/products/turskit-the-goth-girl-who-loves-you",
-    "https://www.makeship.com/products/twig-plushie",
-    "https://www.makeship.com/products/twist-plush",
-    "https://www.makeship.com/products/uk-ball-plush",
-    "https://www.makeship.com/products/ultimate-lion-plush",
-    "https://www.makeship.com/products/usa-ball-gitd-plush",
-    "https://www.makeship.com/products/valbun-2-0",
-    "https://www.makeship.com/products/vanilla-plush",
-    "https://www.makeship.com/products/velverosa-plush",
-    "https://www.makeship.com/products/venkman-plush",
-    "https://www.makeship.com/products/vi-plush",
-    "https://www.makeship.com/products/vince-dead-plate",
-    "https://www.makeship.com/products/virginia-plush",
-    "https://www.makeship.com/products/viro-plush",
-    "https://www.makeship.com/products/vivi-plush",
-    "https://www.makeship.com/products/vorkath-jumbo-plush",
-    "https://www.makeship.com/products/voxer",
-    "https://www.makeship.com/products/vrcat-plush",
-    "https://www.makeship.com/products/vrcat-vinyl",
-    "https://www.makeship.com/products/vriki-plush",
-    "https://www.makeship.com/products/vriska-plushie",
-    "https://www.makeship.com/products/vrrat-plush",
-    "https://www.makeship.com/products/walden-plush",
-    "https://www.makeship.com/products/wally-darling-2-0-plushie",
-    "https://www.makeship.com/products/wally-darling-plush",
-    "https://www.makeship.com/products/watson-amelia",
-    "https://www.makeship.com/products/waxed-lightly-weathered-cut-copper-stairs-plushie",
-    "https://www.makeship.com/products/webfishing-cat-plush",
-    "https://www.makeship.com/products/welcome-home-enamel-pin-collection",
-    "https://www.makeship.com/products/wendigoon-gitd-plush",
-    "https://www.makeship.com/products/were-wolf-plushie",
-    "https://www.makeship.com/products/will-stetson-rabbit-girl",
-    "https://www.makeship.com/products/willy-plush",
-    "https://www.makeship.com/products/willy-wonky-plush",
-    "https://www.makeship.com/products/wise-old-man-plush",
-    "https://www.makeship.com/products/witch-sheep-plushie",
-    "https://www.makeship.com/products/wizard-goblin",
-    "https://www.makeship.com/products/wizard-plush",
-    "https://www.makeship.com/products/wolfgang-seamus-plushie",
-    "https://www.makeship.com/products/yellow-shrimpster",
-    "https://www.makeship.com/products/yuniiho-dog-form-plush",
-    "https://www.makeship.com/products/z-13-sebastian-solace-plush",
-    "https://www.makeship.com/products/zardy-plush",
-    "https://www.makeship.com/products/zentreya-plush",
-    "https://www.makeship.com/products/zombie-clyde-gitd-plush",
-    "https://www.makeship.com/products/zombie-emotional-support-demon-plushie",
-    "https://www.makeship.com/products/zomg-jumbo-plush"
+def load_urls_from_file():
+    """가장 최근에 생성된 makeship_unique_products_*.txt 파일에서 URL을 로드합니다."""
+    import glob
+    import os
+    
+    list_of_files = glob.glob('makeship_unique_products_*.txt')
+    if not list_of_files:
+        print("오류: 'makeship_unique_products_*.txt' 파일을 찾을 수 없습니다.")
+        print("먼저 'complete_infinite_extractor.py'를 실행하여 제품 링크를 추출해주세요.")
+        return []
 
-    ]
-    
-    all_products_data = []
-    
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
-        Stealth(page, ALL_EVASIONS_DISABLED_KWARGS).apply()
-        
-        for i, url in enumerate(urls, 1):
-            print(f"\n=== 제품 {i}/{len(urls)} 처리 중 ===")
-            print(f"URL: {url}")
+    latest_file = max(list_of_files, key=os.path.getctime)
+    urls = []
+    try:
+        with open(latest_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                # URL만 포함된 라인 필터링 (숫자. URL 형식 제외)
+                if line.strip().startswith("https://www.makeship.com/products/"):
+                    urls.append(line.strip())
+                # 또는 '1. URL' 형식에서 URL만 추출
+                elif line.strip().startswith(tuple(str(i) + '. ' for i in range(10))):
+                    parts = line.strip().split('. ', 1)
+                    if len(parts) == 2:
+                        urls.append(parts[1])
+        print(f"'{latest_file}' 파일에서 {len(urls)}개의 URL을 로드했습니다.")
+    except Exception as e:
+        print(f"URL 파일 로드 중 오류 발생: {e}")
+        return []
+    return urls
+
+async def process_url(browser, url, proxy, semaphore, all_products_data, is_rescrape=False):
+    async with semaphore:
+        # is_rescrape 여부와 관계없이, process_url은 항상 스크래핑을 시도합니다.
+        # 건너뛰기 로직은 main 함수에서 이미 처리된 URL을 tasks에 추가하지 않는 방식으로 처리됩니다.
+
+        context = None
+        try:
+            context = await browser.new_context(proxy={"server": f"http://{proxy}"}) # 컨텍스트 생성 및 프록시 적용
+            page = await context.new_page()
             
-            product_data = extract_product_data(page, url)
-            
+            # Stealth 적용 (최신 방식)
+            stealth_instance = Stealth() # Stealth 클래스 인스턴스 생성
+            await stealth_instance.apply_stealth_async(context) # context에 비동기 stealth 적용
+
+            product_data = await extract_product_data(page, url)
             if product_data:
-                all_products_data.append(product_data)
-                
-                # 개별 제품 정보 출력
-                print("--- 추출된 정보 ---")
-                print(f"진행 여부: {product_data['진행_여부']}")
-                print(f"제품군: {product_data['제품군']}")
-                print(f"제품명: {product_data['제품명']}")
-                print(f"IP명: {product_data['IP명']}")
-                print(f"IP 소개 링크: {product_data['IP_소개_링크']}")
-                print(f"판매량: {product_data['판매량']}")
-                print(f"달성률: {product_data['달성률']}")
-                print(f"프로젝트 종료일: {product_data['프로젝트_종료일']}")
-                print(f"배송 시작일: {product_data['배송_시작일']}")
+                all_products_data[url] = product_data # 딕셔너리에 추가 또는 업데이트
+                # 개별 제품 정보 출력 (JSON 형식으로)
+                print(f"[{product_data['진행_여부']}] 제품명: {product_data['제품명']} | 판매량: {product_data['판매량']} | 달성률: {product_data['달성률']} | 가격: ${product_data['제품_가격']}")
+                return product_data
             else:
                 print(f"제품 데이터 추출 실패: {url}")
+                return None
+        except Exception as e:
+            print(f"URL {url} 처리 중 예외 발생: {e}")
+            return None
+        finally:
+            if context:
+                await context.close()
+
+async def main():
+    urls = load_urls_from_file()
+    if not urls:
+        print("처리할 URL이 없으므로 스크립트를 종료합니다.")
+        return
+
+    proxies = load_proxies_from_file()
+    if not proxies:
+        print("로드된 프록시가 없습니다. 스크립트를 종료합니다.")
+        return
+
+    # 이전에 저장된 JSON 파일들을 로드하여 이미 처리된 URL 목록과 "Sold Out" 제품 목록을 가져옵니다.
+    print("이전에 처리된 제품 데이터 로드 중...")
+    all_products_data = {}
+    sold_out_urls_to_rescrape = set()
+    json_files = glob.glob('makeship_all_products_*.json')
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if "제품_목록" in data:
+                    for product in data["제품_목록"]:
+                        if "제품_URL" in product:
+                            url = product["제품_URL"]
+                            all_products_data[url] = product
+                            if product.get("판매량") == "Sold Out":
+                                sold_out_urls_to_rescrape.add(url)
+            print(f"'{json_file}'에서 {len(data.get("제품_목록", []))}개 제품 로드 완료.")
+        except Exception as e:
+            print(f"'{json_file}' 로드 중 오류 발생: {e}")
+
+    print(f"총 {len(all_products_data)}개의 URL이 이전에 처리되었으며, 그 중 {len(sold_out_urls_to_rescrape)}개가 'Sold Out' 제품입니다.")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True) # 브라우저를 헤드리스 모드로 한 번만 실행 (속도 향상)
+        # 세마포어를 사용하여 동시 실행 브라우저 수 제한 (예: 10개로 증가)
+        semaphore = asyncio.Semaphore(10)
         
-        browser.close()
+        # --- "Sold Out" 제품 우선 재스크래핑 ---
+        if sold_out_urls_to_rescrape:
+            print(f"\n=== 'Sold Out' 제품 {len(sold_out_urls_to_rescrape)}개 재스크래핑 시작 ===")
+            tasks = []
+            for i, url in enumerate(list(sold_out_urls_to_rescrape), 0):
+                proxy = proxies[i % len(proxies)]
+                tasks.append(process_url(browser, url, proxy, semaphore, all_products_data, is_rescrape=True))
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True) # 예외 발생 시에도 결과 반환
+            completed_sold_out_count = 0
+            for result in results:
+                if isinstance(result, Exception):
+                    print(f"❗️ 'Sold Out' 제품 처리 중 오류 발생: {result}")
+                elif result:
+                    all_products_data[result["제품_URL"]] = result
+                    completed_sold_out_count += 1
+
+            print(f"\n=== 'Sold Out' 제품 재스크래핑 완료. {completed_sold_out_count}/{len(sold_out_urls_to_rescrape)}개 처리. ===")
+
+        # --- 나머지 URL 및 신규 제품 스크래핑 (Sold Out 제외 모든 URL 대상) ---
+        print(f"\n=== 나머지 및 신규 제품 스크래핑 시작 (Sold Out 제외 총 {len(urls) - len(sold_out_urls_to_rescrape)}개 URL 대상) ===")
+        tasks = []
+        for i, url in enumerate(urls, 0):
+            # 이미 'Sold Out' 재스크래핑에서 처리된 URL은 건너뛰기
+            if url in sold_out_urls_to_rescrape:
+                continue
+
+            proxy = proxies[i % len(proxies)] # 라운드 로빈 방식으로 프록시 할당
+            tasks.append(process_url(browser, url, proxy, semaphore, all_products_data))
+        
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True) # 예외 발생 시에도 결과 반환
+            completed_other_count = 0
+            for result in results:
+                if isinstance(result, Exception):
+                    print(f"❗️ 일반 스크래핑 중 오류 발생: {result}")
+                elif result:
+                    all_products_data[result["제품_URL"]] = result
+                    completed_other_count += 1
+            print(f"\n=== 나머지 및 신규 제품 스크래핑 완료. {completed_other_count}/{len(tasks)}개 처리. ===")
+        else:
+            print("Sold Out 제품을 제외하고 추가로 스크래핑할 제품이 없습니다.")
+        
+        await browser.close() # 모든 작업 후 브라우저 종료
     
     # 모든 데이터를 하나의 JSON 파일로 저장
     if all_products_data:
         final_data = {
             "추출_시간": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "총_제품_수": len(all_products_data),
-            "제품_목록": all_products_data
+            "제품_목록": list(all_products_data.values())
         }
         
-        # 파일명에 현재 시간 포함
         filename = f"makeship_all_products_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
         try:
@@ -977,4 +607,4 @@ def main():
         print("\n추출된 데이터가 없습니다.")
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
