@@ -54,8 +54,28 @@ def get_category_price(category):
 
 def calculate_revenue(sales_volume, category, product_price):
     try:
-        if not sales_volume or sales_volume in ["판매량 정보를 찾을 수 없습니다.", "Sold Out"]:
+        # 판매량이 정보 없음인 경우만 0 반환
+        if not sales_volume or sales_volume == "판매량 정보를 찾을 수 없습니다.":
             return 0.0
+        
+        # Sold Out인 경우 최소 목표 수량(200개)로 가정하여 매출 계산
+        if sales_volume == "Sold Out":
+            sales_count = 200  # Sold Out은 최소 목표 달성을 의미하므로 200개로 가정
+            
+            # 실제 크롤링한 가격이 있으면 사용, 없으면 제품군별 하드코딩 가격 사용
+            actual_price = 0.0
+            if product_price and product_price != "가격을 찾을 수 없습니다.":
+                price_match = re.search(r'(\d+\.?\d*)', str(product_price).replace(',', ''))
+                if price_match:
+                    actual_price = float(price_match.group(1))
+            
+            if actual_price == 0.0:
+                actual_price = get_category_price(category)
+            
+            revenue = sales_count * actual_price
+            print(f"'Sold Out' 제품 - 최소 {sales_count}개 판매 가정, 가격: ${actual_price}, 매출: ${revenue:.2f}")
+            return round(revenue, 2)
+        
         sales_match = re.search(r'(\d+)', str(sales_volume).replace(',', ''))
         if sales_match:
             sales_count = int(sales_match.group(1))
@@ -66,13 +86,6 @@ def calculate_revenue(sales_volume, category, product_price):
                     actual_price = float(price_match.group(1))
             if actual_price == 0.0:
                 actual_price = get_category_price(category)
-                print(f"제품군 '{category}' 하드코딩 가격 사용: ${actual_price}")
-
-            if sales_volume == "Sold Out":
-                estimated_price = get_category_price(category)
-                revenue = sales_count * (estimated_price * 1000) # 추정 가격에 1000을 곱하여 매출 계산
-                print(f"판매량이 'Sold Out'일 경우, 제품군 '{category}'의 추정 가격 ${estimated_price}에 1000을 곱하여 매출을 계산했습니다.")
-                return round(revenue, 2)
 
             revenue = sales_count * actual_price
             return round(revenue, 2)
@@ -102,15 +115,15 @@ def process_sales_data(sales_raw_text, funded_raw_text):
 
     # 2. 달성률 파싱
     if funded_raw_text and funded_raw_text != "정보 없음":
-        funded_pattern = r'([0-9,]+%)\s+Funded'
+        funded_pattern = r'([0-9,]+%)(?:\s*\+)?\s+Funded' # '+' 기호 처리 추가
         funded_match = re.search(funded_pattern, funded_raw_text, re.IGNORECASE)
         if funded_match:
             processed_rate = funded_match.group(1).replace(',', '')
         elif "Sold Out" in funded_raw_text:
             processed_rate = "Sold Out"
 
-    # 3. 판매량 기반 달성률 계산 (X of Y sold -> X/Y 비율)
-    if processed_sales != "판매량 정보를 찾을 수 없습니다." and processed_sales != "Sold Out" and "of" in sales_raw_text:
+    # 3. 판매량 기반 달성률 계산 (X of Y sold -> X/Y 비율) - 명시적인 달성률이 없을 때만 시도
+    if processed_rate == "달성률 정보를 찾을 수 없습니다." and processed_sales != "판매량 정보를 찾을 수 없습니다." and processed_sales != "Sold Out" and "of" in sales_raw_text:
         sold_of_pattern = r'([0-9,]+)\s+of\s+([0-9,]+)\s+sold'
         sold_of_match = re.search(sold_of_pattern, sales_raw_text, re.IGNORECASE)
         if sold_of_match:
@@ -241,15 +254,31 @@ async def debug_page_structure(url: str):
                     print(f"IP명 추출 실패: {e}")
 
                 # --- 제품군 ---
+                # 제품 헤더 내에서 /shop/ 또는 /collections/ URL을 포함하는 p 태그, 또는 "Store" 텍스트를 포함하는 a 태그를 찾아 제품군을 추출합니다.
+                # "Visit Creator Store"와 같은 불필요한 텍스트를 제거하고, 제거 후 빈 문자열인 경우 링크 텍스트에서 단어만 추출하는 폴백 로직을 포함합니다.
                 try:
-                    category_locator = page.locator('[class*="ProductInfo__ProductHeaderWrapper"] a[href*="/shop/"] p, [class*="ProductInfo__ProductHeaderWrapper"] a[href*="/collections/"] p').first
+                    category_locator = page.locator('[class*="ProductInfo__ProductHeaderWrapper"] a[href*="/shop/"] p, [class*="ProductInfo__ProductHeaderWrapper"] a[href*="/collections/"] p, [class*="ProductInfo__ProductHeaderWrapper"] a:has-text("Store")')
                     if await category_locator.count() > 0:
-                        product_data["제품군"] = await category_locator.inner_text(timeout=3000)
+                        category_text = await category_locator.first.inner_text(timeout=3000)
+                        # "Visit Creator Store" 또는 "Visit Store" 같은 텍스트 제거
+                        processed_category = re.sub(r'^Visit\s+.*\s+Store$', '', category_text, flags=re.IGNORECASE).strip()
+                        if not processed_category:
+                            # 만약 Visit Store 제거 후 빈 문자열이 되면, 링크의 텍스트 자체를 사용 (단어만)
+                            link_text = await category_locator.first.inner_text(timeout=3000)
+                            match = re.search(r'([A-Za-z]+)', link_text)
+                            if match:
+                                processed_category = match.group(1).strip()
+                            else:
+                                processed_category = "제품군을 찾을 수 없습니다."
+                        product_data["제품군"] = processed_category
                     print(f"제품군: {product_data['제품군']}")
                 except Exception as e:
+                    product_data["제품군"] = "제품군 추출 실패: " + str(e)
                     print(f"제품군 추출 실패: {e}")
 
                 # --- 프로젝트 종료일 및 진행 여부 ---
+                # 페이지에서 프로젝트 종료일 정보를 추출하고, 이를 기반으로 제품의 진행 상태를 결정합니다.
+                # 다양한 종료일 텍스트 패턴에 대응하며, normalize_date 함수를 사용하여 날짜 형식을 표준화합니다.
                 try:
                     end_date = "해당 없음"
                     status = "종료"
@@ -285,6 +314,8 @@ async def debug_page_structure(url: str):
                     print(f"프로젝트 종료일/진행 여부 추출 실패: {e}")
 
                 # --- 판매량 및 달성률 추출 ---
+                # 페이지에서 판매량과 달성률 정보를 추출하고, 이를 정규 표현식을 사용하여 파싱합니다.
+                # 명시적인 달성률(%)이 있을 경우 우선하고, 없을 경우 판매량 기반으로 달성률을 계산합니다.
                 try:
                     sales_text_found = ""
                     funded_text_found = ""
@@ -375,74 +406,110 @@ async def debug_page_structure(url: str):
                     product_data["판매량"] = "판매량 정보를 찾을 수 없습니다."
                     product_data["달성률"] = "달성률 정보를 찾을 수 없습니다."
                 
-                # 배송 시작일
+                # --- 배송 시작일 ---
+                # 페이지에서 배송 시작일 정보를 추출하고, normalize_date 함수를 사용하여 날짜 형식을 표준화합니다.
                 try:
                     shipping_date = "배송 시작일 정보를 찾을 수 없습니다."
+                    # 1. 사용자께서 존재한다고 말씀해주신 선택자 먼저 시도
                     primary_shipping_date_locator = page.locator('#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div.ProductInfo__PostPurchaseDetailsWrapper-sc-pdgh6r-9.jthCJt > div > div > p')
                     if await primary_shipping_date_locator.count() > 0:
                         shipping_date_text = await primary_shipping_date_locator.inner_text(timeout=3000)
                         shipping_date = shipping_date_text.replace('Ships ', '').strip()
+                    
+                    # 2. 첫 번째 선택자가 실패했을 경우 (아직 기본값인 경우), '초록색 선택자' 시도
                     if shipping_date == "배송 시작일 정보를 찾을 수 없습니다.":
                         fallback_shipping_date_locator = page.locator('#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div.commonFunctions__HybridMessagingContainer-sc-e97hvy-8.gpFhIO')
                         if await fallback_shipping_date_locator.count() > 0:
                             shipping_date_text = await fallback_shipping_date_locator.inner_text(timeout=3000)
                             shipping_date = shipping_date_text.replace('Ships ', '').strip()
+                    
+                    # 3. 새로운 일반적인 선택자 추가 (배송 관련 텍스트 검색)
+                    if shipping_date == "배송 시작일 정보를 찾을 수 없습니다.":
+                        general_shipping_locator = page.locator(r'p:has-text("Ships "), p:has-text("estimated to ship on")')
+                        if await general_shipping_locator.count() > 0:
+                            shipping_text = await general_shipping_locator.first.inner_text(timeout=3000)
+                            # "Ships Month Day, Year." 또는 "estimated to ship on Month Day, Year."에서 날짜 추출
+                            date_match = re.search(r'([A-Za-z]+\s+\d{1,2},\s+\d{4})', shipping_text)
+                            if date_match:
+                                shipping_date = date_match.group(0).strip()
+                            else:
+                                shipping_date = shipping_text.replace('Ships ', '').strip() # 남은 부분에서 최대한 정보 추출
+
                     product_data["배송_시작일"] = normalize_date(shipping_date)
                     print(f"배송 시작일: {product_data['배송_시작일']}")
                 except Exception as e:
                     print(f"배송 시작일 추출 실패: {e}")
 
-                # IP 소개 링크
+                # --- IP 소개 링크 ---
+                # CreatorMessageWrapper 클래스를 가진 요소 내의 링크를 찾아 IP 소개 링크를 추출합니다.
                 try:
+                    # ip_link는 이미 product_data 초기화 시 "IP 소개 링크를 찾을 수 없습니다."로 설정됨
+                    # 여러 링크가 있을 수 있으므로 첫 번째 링크를 선택
                     ip_link_elements = page.locator('[class*="CreatorMessage__CreatorMessageWrapper"] a')
                     if await ip_link_elements.count() > 0:
-                        ip_link = await ip_link_elements.first.get_attribute('href', timeout=3000)
-                        if ip_link and ip_link.startswith('/'):
-                            ip_link = f"https://www.makeship.com{ip_link}"
-                        product_data["IP_소개_링크"] = ip_link
-                    print(f"IP 소개 링크: {product_data['IP_소개_링크']}")
+                        extracted_link = await ip_link_elements.first.get_attribute('href', timeout=3000)
+                        if extracted_link and extracted_link.startswith('/'):
+                            product_data["IP_소개_링크"] = f"https://www.makeship.com{extracted_link}"
+                        else:
+                            product_data["IP_소개_링크"] = extracted_link
+                    # else 블록은 필요 없음 (초기값이 '찾을 수 없음'이므로)
                 except Exception as e:
+                    product_data["IP_소개_링크"] = "IP 소개 링크 추출 실패: " + str(e)
                     print(f"IP 소개 링크 추출 실패: {e}")
 
-                # 제품 가격
-                product_price_temp = "가격을 찾을 수 없습니다."
+                # --- 제품 가격 ---
+                # 페이지에서 제품 가격을 추출합니다. 사용자가 제공한 정확한 선택자를 우선 사용하고,
+                # 여러 폴백 선택자들을 사용하여 가격 추출의 정확도를 높입니다.
                 try:
-                    # 1. 기존의 primary_price_locator (nth-child(5) 버전) 시도
-                    if product_price_temp == "가격을 찾을 수 없습니다.":
-                        old_primary_price_locator = page.locator('#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div:nth-child(5) > div > div > div > div.CompleteCollectionComponent__CompleteCollectionDetailRow-sc-pxn9vj-13.ffmDLt > div.CompleteCollectionComponent__TotalPriceWrapper-sc-pxn9vj-19.cDyXqm > div > p > font:nth-child(2) > font:nth-child(1)')
-                        if await old_primary_price_locator.count() > 0:
-                            product_price_temp = (await old_primary_price_locator.inner_text(timeout=3000)).replace('$', '').strip()
-                        
-                    # 2. 사용자께서 요청하신 새로운 선택자 1 (`.ProductDetails__ProductDetailsWrapper... > p`) 시도
-                    if product_price_temp == "가격을 찾을 수 없습니다.":
-                        new_price_locator_1 = page.locator('#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div.ProductDetails__ProductDetailsWrapper-sc-1r20xdj-0.bUehNf > div > p')
-                        if await new_price_locator_1.count() > 0:
-                            product_price_temp = (await new_price_locator_1.inner_text(timeout=3000)).replace('$', '').strip()
+                    product_price_temp = "가격을 찾을 수 없습니다."
+                    # 1. 사용자께서 제공하신 정확한 선택자 시도 (최우선)
+                    primary_price_locator = page.locator('#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div.ProductInfo__ProductHeaderWrapper-sc-pdgh6r-2.jUpShe > div > div > p')
+                    if await primary_price_locator.count() > 0:
+                        price_text = await primary_price_locator.first.inner_text(timeout=3000)
+                        print(f"DEBUG 가격 추출 (primary): '{price_text}'")
+                        match = re.search(r'\$?(\d+\.?\d*)', price_text)
+                        if match:
+                            product_price_temp = match.group(1).strip()
+                        else:
+                            product_price_temp = price_text.replace('$', '').strip() # 달러 기호 제거
                     
-                    # 3. 사용자께서 요청하신 새로운 선택자 2 (`.ProductInfo__ProductHeaderWrapper... > div > p`) 시도
+                    # 2. 일반적인 가격 선택자 시도 (폴백)
                     if product_price_temp == "가격을 찾을 수 없습니다.":
-                        new_price_locator_2 = page.locator('#__next > div._app__ContainerWrapper-sc-meusgd-0.fdDSJw > div > div._app__ContentWrapper-sc-meusgd-2.iURiPk > div > div > div.handle__ProductInfoWrapper-sc-1y81hk8-2.kYqEeP > div > div.ProductInfo__ProductHeaderWrapper-sc-pdgh6r-2.jUpShe > div > div > p')
-                        if await new_price_locator_2.count() > 0:
-                            product_price_temp = (await new_price_locator_2.inner_text(timeout=3000)).replace('$', '').strip()
+                        general_price_locator = page.locator('[class*="ProductInfo__Price"]')
+                        if await general_price_locator.count() > 0:
+                            price_text = await general_price_locator.first.inner_text(timeout=3000)
+                            print(f"DEBUG 가격 추출 (general): '{price_text}'")
+                            product_price_temp = price_text.replace('$', '').strip()
 
-                    # 4. "Total Price:" 텍스트를 포함하는 요소 찾기
+                    # 3. "Total Price:" 텍스트를 포함하는 요소 찾기 (폴백)
                     if product_price_temp == "가격을 찾을 수 없습니다.":
                         fallback_price_locator_text = page.locator(r'text=/Total Price: \$[0-9,.]+/i')
                         if await fallback_price_locator_text.count() > 0:
                             price_text = await fallback_price_locator_text.inner_text(timeout=3000)
+                            print(f"DEBUG 가격 추출 (Total Price): '{price_text}'")
                             match = re.search(r'\$[0-9,.]+', price_text)
                             if match:
                                 product_price_temp = match.group(0).replace('$', '').strip()
                             
-                    # 5. 일반적인 가격 선택자 시도
+                    # 4. 달러 기호와 숫자를 포함하는 일반적인 선택자 시도 (최종 폴백)
                     if product_price_temp == "가격을 찾을 수 없습니다.":
-                        general_price_locator = page.locator('[class*="ProductInfo__Price"]')
-                        if await general_price_locator.count() > 0:
-                            product_price_temp = (await general_price_locator.inner_text(timeout=3000)).replace('$', '').strip()
+                        general_price_with_dollar_locator = page.locator(r'p:has-text("$")', has_text=re.compile(r'\$[0-9]+\.?[0-9]{0,2}'))
+                        if await general_price_with_dollar_locator.count() > 0:
+                            price_text = await general_price_with_dollar_locator.first.inner_text(timeout=3000)
+                            print(f"DEBUG 가격 추출 (dollar locator): '{price_text}'")
+                            match = re.search(r'\$?(\d+\.?\d*)', price_text)
+                            if match:
+                                product_price_temp = match.group(1).strip()
                 except Exception as e:
                     print(f"제품 가격 추출 실패: {e}")
 
-                if product_price_temp == "가격을 찾을 수 없습니다.":
+                # 제품 가격을 찾지 못했거나 0인 경우, 제품군별 하드코딩 가격으로 대체
+                try:
+                    price_float = float(product_price_temp) if product_price_temp != "가격을 찾을 수 없습니다." else 0.0
+                except:
+                    price_float = 0.0
+                
+                if product_price_temp == "가격을 찾을 수 없습니다." or price_float == 0.0:
                     estimated_price = get_category_price(product_data["제품군"])
                     product_data["제품_가격"] = f"{estimated_price:.2f}"
                     print(f"경고: 제품 가격을 찾을 수 없어 제품군 '{product_data['제품군']}'의 추정 가격 ${product_data['제품_가격']}로 대체했습니다.")
@@ -454,9 +521,12 @@ async def debug_page_structure(url: str):
                 product_data["매출"] = calculate_revenue(product_data["판매량"], product_data["제품군"], product_data["제품_가격"])
                 print(f"매출: ${product_data['매출']}")
 
-                print("\n--- 최종 추출된 정보 ---")
-                for key, value in product_data.items():
-                    print(f"{key}: {value}")
+                # 최종 추출된 정보를 JSON 형식으로 출력
+                print(f"\n{'='*80}")
+                print(f"✅ [{product_data['진행_여부']}] {product_data['제품명']}")
+                print(f"{'='*80}")
+                print(json.dumps(product_data, ensure_ascii=False, indent=2))
+                print(f"{'='*80}\n")
                 
                 break # Success, so exit the proxy loop
             
@@ -474,7 +544,7 @@ async def main():
 
 if __name__ == '__main__':
     # 테스트할 URL
-    # test_url = "https://www.makeship.com/products/inky-cap-keychain-plushie"
-    test_url = "https://www.makeship.com/products/a-date-with-death-grim-reaper-hoodie"
-    # test_url = "https://www.makeship.com/products/absolute-cinema-plushie"
+    
+    test_url = "https://www.makeship.com/products/satan-plush"
+    
     asyncio.run(debug_page_structure(test_url))

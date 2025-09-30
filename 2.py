@@ -3,6 +3,7 @@ import pandas as pd
 import os
 from datetime import datetime
 import glob
+import re
 
 def load_json_files():
     """현재 폴더의 Makeship 관련 JSON 파일들을 로드"""
@@ -41,8 +42,12 @@ def load_json_files():
                     product['판매량'] = convert_to_numeric(product['판매량'])
                 if '달성률' in product: # 달성률 숫자 형식 변환
                     product['달성률'] = convert_to_numeric(product['달성률'])
-                
-                all_data.extend(products)
+                # 판매량이 0이면 매출도 0으로 처리
+                if '판매량' in product and '매출' in product:
+                    if product['판매량'] == 0:
+                        product['매출'] = 0
+            
+            all_data.extend(products)
                 
         except Exception as e:
             print(f"{json_file} 로드 중 오류: {e}")
@@ -52,15 +57,21 @@ def load_json_files():
 def normalize_date(date_str):
     """
     다양한 날짜 문자열 형식을 'YYYY-MM-DD' 형식으로 변환합니다.
+    - 'YYYY-MM-DD' (이미 정규화된 형식)
     - 'July 1, 5:00AM GMT+9 / Ships September 23, 2025'
     - 'September 17, 2022'
     - 'July 1, 2022'
+    - '해당 없음'
     등을 처리할 수 있도록 개선합니다.
     """
-    if not date_str or date_str == '정보 없음':
-        return '정보 없음'
+    if not date_str or date_str in ['정보 없음', '해당 없음', '상태 확인 중 오류']:
+        return date_str if date_str else '정보 없음'
 
-    # ' / ' 기준으로 나누어 프로젝트 종료일과 배송 시작일 분리
+    # 1. 이미 YYYY-MM-DD 형식인 경우 그대로 반환
+    if isinstance(date_str, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+        return date_str
+
+    # 2. ' / ' 기준으로 나누어 프로젝트 종료일과 배송 시작일 분리
     parts = date_str.split(' / ')
     
     # 프로젝트 종료일 처리 (첫 번째 부분)
@@ -74,7 +85,7 @@ def normalize_date(date_str):
     except ValueError:
         pass # 파싱 실패 시 다음 형식 시도
 
-    # 'Ships September 23, 2025' 같은 형식 처리
+    # 3. 'Ships September 23, 2025' 같은 형식 처리
     if 'Ships ' in date_str:
         ship_date_part = date_str.split('Ships ')[-1].strip()
         try:
@@ -84,16 +95,25 @@ def normalize_date(date_str):
         except ValueError:
             pass # 파싱 실패 시 다음 형식 시도
     
-    # Fallback: 일반적인 날짜 형식 시도
+    # 4. Fallback: 일반적인 날짜 형식 시도
     try:
         dt_object = datetime.strptime(date_str.replace(',', ''), '%B %d %Y')
         return dt_object.strftime('%Y-%m-%d')
     except ValueError:
-        return '정보 없음'
+        # 변환 실패 시 원본 반환
+        return date_str
 
 def convert_to_numeric(value_str):
     """문자열에서 숫자만 추출하여 정수 또는 실수로 변환합니다."""
-    if not value_str or value_str == '정보 없음' or not isinstance(value_str, str):
+    # 이미 숫자인 경우 그대로 반환
+    if isinstance(value_str, (int, float)):
+        return value_str
+    
+    if not value_str or value_str == '정보 없음':
+        return 0
+    
+    # 문자열이 아닌 경우 0 반환
+    if not isinstance(value_str, str):
         return 0
 
     clean_value = value_str.replace(',', '').replace(' sold', '').strip()
@@ -102,7 +122,11 @@ def convert_to_numeric(value_str):
         if '%' in clean_value:
             return float(clean_value.replace('%', ''))
         else:
-            return int(clean_value)
+            # 정수 또는 실수로 변환 시도
+            if '.' in clean_value:
+                return float(clean_value)
+            else:
+                return int(clean_value)
     except ValueError:
         return 0
 
@@ -147,20 +171,55 @@ def create_excel_from_products(products, filename):
     available_columns = [col for col in column_order if col in df.columns]
     df = df[available_columns]
 
-    # 숫자형 컬럼 강제 변환 (에러 발생 시 0으로 처리)
+    # 숫자형 컬럼 타입 확인 및 변환
     for col in ['판매량', '달성률', '매출']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    
+    # 제품 가격도 숫자로 변환
+    if '제품_가격' in df.columns:
+        df['제품_가격'] = pd.to_numeric(df['제품_가격'], errors='coerce').fillna(0)
 
-    # 날짜 컬럼은 변환된 문자열 형식으로 유지
+    # 날짜 컬럼을 datetime 객체로 변환
+    for col in ['프로젝트_종료일', '배송_시작일']:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors='coerce', format='%Y-%m-%d')
     
     # 엑셀 파일로 저장
     try:
-        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        from openpyxl.styles import numbers
+        
+        with pd.ExcelWriter(filename, engine='openpyxl', datetime_format='yyyy-mm-dd') as writer:
             df.to_excel(writer, sheet_name='Products', index=False)
             
             # 워크시트 서식 설정
             worksheet = writer.sheets['Products']
+            
+            # 컬럼별 형식 지정
+            for idx, col in enumerate(df.columns, start=1):
+                col_letter = worksheet.cell(row=1, column=idx).column_letter
+                
+                # 숫자 형식 지정
+                if col in ['판매량', '매출']:
+                    for row in range(2, len(df) + 2):
+                        cell = worksheet.cell(row=row, column=idx)
+                        cell.number_format = '#,##0'  # 천단위 구분 정수
+                
+                elif col == '달성률':
+                    for row in range(2, len(df) + 2):
+                        cell = worksheet.cell(row=row, column=idx)
+                        cell.number_format = '0.0"%"'  # 소수점 첫째자리 + %
+                
+                elif col == '제품_가격':
+                    for row in range(2, len(df) + 2):
+                        cell = worksheet.cell(row=row, column=idx)
+                        cell.number_format = '$#,##0.00'  # 달러 형식
+                
+                # 날짜 형식 지정
+                elif col in ['프로젝트_종료일', '배송_시작일']:
+                    for row in range(2, len(df) + 2):
+                        cell = worksheet.cell(row=row, column=idx)
+                        cell.number_format = 'yyyy-mm-dd'
             
             # 컬럼 너비 자동 조정
             for column in worksheet.columns:
@@ -174,7 +233,7 @@ def create_excel_from_products(products, filename):
                     except:
                         pass
                 
-                adjusted_width = min(max_length + 2, 50)  # 최대 50자로 제한
+                adjusted_width = min(max_length + 2, 50)
                 worksheet.column_dimensions[column_letter].width = adjusted_width
         
         print(f"✅ {filename} 생성 완료 ({len(df)}개 제품)")
@@ -196,6 +255,21 @@ def create_individual_excel_files(json_files):
                 products = data['제품_목록']
             else:
                 products = [data]
+            
+            # 각 제품 데이터에 대해 형식 변환 적용
+            for product in products:
+                if '프로젝트_종료일' in product:
+                    product['프로젝트_종료일'] = normalize_date(product['프로젝트_종료일'])
+                if '배송_시작일' in product:
+                    product['배송_시작일'] = normalize_date(product['배송_시작일'])
+                if '판매량' in product:
+                    product['판매량'] = convert_to_numeric(product['판매량'])
+                if '달성률' in product:
+                    product['달성률'] = convert_to_numeric(product['달성률'])
+                # 판매량이 0이면 매출도 0으로 처리
+                if '판매량' in product and '매출' in product:
+                    if product['판매량'] == 0:
+                        product['매출'] = 0
             
             # 엑셀 파일명 생성
             excel_filename = json_file.replace('.json', '.xlsx')
